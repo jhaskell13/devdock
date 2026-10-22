@@ -17,11 +17,11 @@ def test_selects_nearest_matching_ancestor(tmp_path: Path) -> None:
     assert discover_project(nested) == project.resolve()
 
 
-def test_uses_nearest_manifest_ancestor_when_start_has_no_marker(tmp_path: Path) -> None:
+def test_uses_start_directory_when_no_marker_exists(tmp_path: Path) -> None:
     nested = tmp_path / "unmarked" / "folder"
     nested.mkdir(parents=True)
 
-    assert discover_project(nested) == Path(__file__).parents[1].resolve()
+    assert discover_project(nested) == nested.resolve()
 
 
 def test_result_exposes_selected_evidence_inventory_and_nested_roots(tmp_path: Path) -> None:
@@ -37,8 +37,7 @@ def test_result_exposes_selected_evidence_inventory_and_nested_roots(tmp_path: P
 
     assert result.root == inner.resolve()
     assert result.matched_markers == ("devdock.yaml", "pyproject.toml")
-    assert outer.resolve() in result.ancestor_roots
-    assert Path(__file__).parents[1].resolve() in result.ancestor_roots
+    assert result.ancestor_roots == (outer.resolve(),)
     assert result.ambiguous
     assert "pyproject.toml" in result.known_files
     assert ".env" not in result.known_files
