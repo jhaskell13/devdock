@@ -33,16 +33,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 0. Repository and CLI contract
 
-**Status:** Initial work is underway. Packaging, a profile schema, `init`, `inspect`, and `check` exist. The repository now has a README, architecture notes, an MIT license, and this roadmap. Remaining tasks include:
-
-- Document command syntax, defaults, exit codes, supported Python versions, and Docker requirements consistently.
-- Add a formal command behavior table and stable output conventions (human-readable default, machine-readable output considered later).
-- Decide whether project discovery searches the current directory, parents, explicit path, or all three in each command; lock behavior with tests.
-- Define a versioned configuration schema, migration policy, unknown-field behavior, path resolution rules, and field validation messages.
-- Document product boundaries: what `check` can prove, what it cannot prove, and which operations may modify files or host resources.
-- Add repository contribution, security-reporting, license, and support guidance.
-- Add continuous integration for supported Python versions and operating systems; keep unit checks independent of a Docker daemon.
-- Establish commit, issue, and release-note conventions that make project history easy to audit.
+**Status:** Complete. The repository has install/use and contribution docs, a CLI behavior contract, versioned profile rules, explicit path constraints, an MIT license, security guidance, issue/PR templates, a changelog, and commit conventions. CI checks Python 3.12–3.14 on Windows, macOS, and Linux. Automated checks cover the core CLI flow, discovery, profile validation, diagnostics, and package builds; unit checks do not require Docker.
 
 **Acceptance:** A new contributor can create an environment, install the CLI, understand all current commands, run the documented quality checks, and tell which behaviors are implemented versus planned.
 
@@ -145,7 +136,6 @@ The plan includes implementation, design, code review, tests, documentation, pac
 - Validate Windows process termination, paths, quoting, console signals, and Docker Desktop differences.
 - Validate Linux Docker socket permissions, rootless Docker, distro package differences, and service availability without assuming systemd.
 - Validate macOS Docker Desktop startup delays, file sharing, and path normalization.
-- Add CI jobs for unit, typing, lint, package build, CLI install smoke test, and supported-platform matrix.
 - Add a separately gated disposable Docker integration job; never make ordinary unit tests depend on a user's daemon.
 - Build and inspect source distributions and wheels; verify entry points, package data, README rendering, and license inclusion.
 - Define versioning, changelog format, deprecation policy, configuration migration, and release tagging process.

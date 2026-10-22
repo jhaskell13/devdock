@@ -2,7 +2,7 @@
 
 DevDock is a local development environment manager. Its goal is to make software projects easier to inspect, configure, start, troubleshoot, and stop on a developer's own machine.
 
-The project is in its first working milestone. The current CLI can create a profile, discover project files, validate that profile, and check a small set of declared prerequisites. It does not start or stop services yet.
+The repository foundation milestone is complete. The current CLI can create a profile, discover project files, validate that profile, and check a small set of declared prerequisites. It does not start or stop services yet.
 
 ## What DevDock does today
 
