@@ -2,6 +2,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import devdock.diagnostics as diagnostics
 from devdock.cli import app
 
 runner = CliRunner()
@@ -36,6 +37,37 @@ def test_check_requires_a_profile(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "devdock.yaml was not found" in result.stderr
+
+
+def test_check_shows_target_interpreter_warning_without_failing(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[WARN] PROJECT_PYTHON_METADATA" in result.stdout
+
+
+def test_check_reports_skipped_dependency_checks_and_preserves_failure_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\nruntimes:\n  docker: compose\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: None)
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "[FAIL] DOCKER_CLI_MISSING" in result.stdout
+    assert "[SKIP] DOCKER_DAEMON_SKIPPED" in result.stdout
+    assert "[SKIP] COMPOSE_CONFIG_SKIPPED" in result.stdout
 
 
 def test_inspect_reports_invalid_profile(tmp_path: Path) -> None:

@@ -1,3 +1,4 @@
+import os
 import socket
 import sys
 from pathlib import Path
@@ -20,6 +21,38 @@ def test_unsupported_runtime_is_actionable(tmp_path: Path) -> None:
     findings = check_profile(profile, tmp_path)
 
     assert any(finding.level == "FAIL" and "ruby" in finding.message for finding in findings)
+
+
+def test_unsupported_python_requirement_does_not_echo_configured_value(
+    tmp_path: Path,
+) -> None:
+    profile = ProjectProfile(
+        schema_version=1,
+        project="sample",
+        runtimes={"python": "TOKEN=private-value"},
+    )
+
+    findings = check_profile(profile, tmp_path)
+
+    assert any(item.code == "PYTHON_REQUIREMENT_UNSUPPORTED" for item in findings)
+    assert "private-value" not in repr(findings)
+
+
+def test_unsupported_docker_requirement_is_categorized_and_marks_checks_skipped(
+    tmp_path: Path,
+) -> None:
+    profile = ProjectProfile(
+        schema_version=1,
+        project="sample",
+        runtimes={"docker": "TOKEN=private-value"},
+    )
+
+    findings = check_profile(profile, tmp_path)
+    by_code = {item.code: item for item in findings}
+
+    assert by_code["DOCKER_REQUIREMENT_UNSUPPORTED"].severity == "FAIL"
+    assert by_code["DOCKER_CHECKS_SKIPPED"].severity == "SKIP"
+    assert "private-value" not in repr(findings)
 
 
 def test_missing_compose_file_is_reported(tmp_path: Path) -> None:
@@ -80,7 +113,7 @@ def test_python_minimum_patch_version_is_compared(
 
 
 def test_project_interpreter_is_distinguished_from_devdock_interpreter(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
@@ -94,7 +127,36 @@ def test_project_interpreter_is_distinguished_from_devdock_interpreter(
         item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
     )
     assert project_finding.severity == "WARN"
-    assert any("target interpreter not inspected" in item for item in project_finding.evidence)
+    assert any("target not inspected" in item for item in project_finding.evidence)
+
+
+def test_active_project_virtual_environment_reports_both_interpreter_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+    executable = tmp_path / ".venv" / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    monkeypatch.setattr(
+        diagnostics,
+        "sys",
+        SimpleNamespace(
+            version_info=SimpleNamespace(major=3, minor=12, micro=4),
+            executable=str(executable),
+        ),
+    )
+
+    findings = check_profile(ProjectProfile(schema_version=1, project="sample"), tmp_path)
+
+    project_finding = next(
+        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
+    )
+    assert project_finding.severity == "PASS"
+    assert any(item.startswith("DevDock executable:") for item in project_finding.evidence)
+    assert any(item.startswith("Target project executable:") for item in project_finding.evidence)
+    assert any(item == "Target project version: 3.12.4" for item in project_finding.evidence)
 
 
 def test_environment_diagnostics_distinguish_unset_and_empty_without_values(
@@ -166,6 +228,26 @@ def test_rejects_resolved_paths_outside_project_without_platform_symlink_support
     assert any(item.code == "REQUIRED_DIRECTORY_OUTSIDE_PROJECT" for item in findings)
 
 
+def test_unresolvable_required_paths_are_reported_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = ProjectProfile(
+        schema_version=1, project="sample", required_files=[Path("loop")]
+    )
+    original_resolve = Path.resolve
+
+    def fail_loop(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == tmp_path / "loop":
+            raise RuntimeError("symlink loop")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_loop)
+
+    findings = check_profile(profile, tmp_path)
+
+    assert any(item.code == "REQUIRED_FILE_UNRESOLVABLE" for item in findings)
+
+
 def test_compose_file_symlink_cannot_escape_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -229,8 +311,8 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
     )
     results = iter(
         [
-            SimpleNamespace(returncode=0, stdout="Docker Compose version v2", stderr=""),
-            SimpleNamespace(returncode=0, stdout="27.0", stderr=""),
+            SimpleNamespace(returncode=0, stdout="compose-output-secret", stderr=""),
+            SimpleNamespace(returncode=0, stdout="daemon-output-secret", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
@@ -253,6 +335,7 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
     } <= codes
     assert len(calls) == 3
     assert calls[2][2:5] == ["-f", str(compose_file), "config"]
+    assert "output-secret" not in repr(findings)
 
 
 def test_compose_parser_errors_do_not_echo_interpolated_values(
@@ -312,6 +395,8 @@ def test_compose_reports_missing_cli_or_plugin(
     findings = check_profile(profile, tmp_path)
 
     assert any(item.code == expected_code and item.severity == "FAIL" for item in findings)
+    assert any(item.code == "DOCKER_DAEMON_SKIPPED" for item in findings)
+    assert any(item.code == "COMPOSE_CONFIG_SKIPPED" for item in findings)
 
 
 def test_compose_parser_is_checked_even_when_daemon_is_unavailable(

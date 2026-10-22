@@ -18,7 +18,7 @@ from devdock.discovery import COMPOSE_NAMES
 from devdock.metadata import read_python_metadata
 
 PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.(\d+))?$")
-Severity = Literal["PASS", "WARN", "FAIL"]
+Severity = Literal["PASS", "WARN", "FAIL", "SKIP"]
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,15 @@ def _finding(
     return Finding(code, severity, summary, evidence, remedy, "docs/cli.md#diagnostic-codes")
 
 
+def _compose_skipped(code: str, check_name: str, reason: str) -> Finding:
+    return _finding(
+        code,
+        "SKIP",
+        f"{check_name} was not run.",
+        evidence=(reason,),
+    )
+
+
 def _compose_path(profile: ProjectProfile, root: Path) -> Path | None:
     if profile.compose_file is not None:
         return root / profile.compose_file
@@ -69,6 +78,25 @@ def _inside_project(path: Path, root: Path) -> bool:
         return False
 
 
+def _resolved_path(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _project_python_interpreters(root: Path) -> tuple[Path, ...]:
+    """Return conventional local virtual-environment interpreter paths."""
+
+    names = (".venv", "venv", "env")
+    candidates = [
+        root / environment / "Scripts" / "python.exe"
+        for environment in names
+    ]
+    candidates.extend(root / environment / "bin" / "python" for environment in names)
+    return tuple(Path(os.path.abspath(path)) for path in candidates)
+
+
 def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding]) -> None:
     requirement = profile.runtimes.get("docker")
     if requirement is None:
@@ -78,11 +106,52 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
             _finding(
                 "DOCKER_REQUIREMENT_UNSUPPORTED",
                 "FAIL",
-                f"Unsupported Docker requirement: {requirement}",
+                "Unsupported Docker requirement.",
                 remedy="Use 'compose' for the initial Docker Compose adapter.",
             )
         )
+        findings.append(
+            _compose_skipped(
+                "DOCKER_CHECKS_SKIPPED",
+                "Docker checks",
+                "The configured Docker requirement is unsupported.",
+            )
+        )
         return
+
+    compose_path = _compose_path(profile, root)
+    compose_file_ready = False
+    if compose_path is None:
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_MISSING",
+                "FAIL",
+                "No Compose file was configured or discovered.",
+                remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
+            )
+        )
+    elif not _inside_project(compose_path, root):
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_OUTSIDE_PROJECT",
+                "FAIL",
+                "Compose file does not resolve inside the selected project.",
+                evidence=(f"File: {compose_path}",),
+                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
+            )
+        )
+    elif not compose_path.is_file():
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_MISSING",
+                "FAIL",
+                f"Compose file not found: {compose_path.name}",
+                evidence=(f"Expected path: {compose_path}",),
+                remedy="Create the file or update compose_file in devdock.yaml.",
+            )
+        )
+    else:
+        compose_file_ready = True
 
     executable = shutil.which("docker")
     if executable is None:
@@ -92,6 +161,16 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 "FAIL",
                 "Docker CLI is not available on PATH.",
                 remedy="Install Docker Desktop or Docker Engine with the Compose plugin.",
+            )
+        )
+        findings.append(
+            _compose_skipped(
+                "DOCKER_DAEMON_SKIPPED", "Docker daemon check", "Docker CLI is missing."
+            )
+        )
+        findings.append(
+            _compose_skipped(
+                "COMPOSE_CONFIG_SKIPPED", "Compose config check", "Docker CLI is missing."
             )
         )
         return
@@ -114,6 +193,20 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 remedy="Install or enable the Docker Compose plugin, then retry.",
             )
         )
+        findings.append(
+            _compose_skipped(
+                "DOCKER_DAEMON_SKIPPED",
+                "Docker daemon check",
+                "The Compose CLI/plugin did not respond.",
+            )
+        )
+        findings.append(
+            _compose_skipped(
+                "COMPOSE_CONFIG_SKIPPED",
+                "Compose config check",
+                "The Compose CLI/plugin did not respond.",
+            )
+        )
         return
     if version.returncode:
         findings.append(
@@ -125,16 +218,27 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 remedy="Install or enable the Docker Compose plugin, then retry.",
             )
         )
+        findings.append(
+            _compose_skipped(
+                "DOCKER_DAEMON_SKIPPED",
+                "Docker daemon check",
+                "The Compose CLI/plugin did not respond.",
+            )
+        )
+        findings.append(
+            _compose_skipped(
+                "COMPOSE_CONFIG_SKIPPED",
+                "Compose config check",
+                "The Compose CLI/plugin did not respond.",
+            )
+        )
         return
     findings.append(
         _finding(
             "COMPOSE_CLI_AVAILABLE",
             "PASS",
             "Docker Compose CLI is available.",
-            evidence=(
-                f"Executable: {executable}",
-                version.stdout.strip() or "Version command succeeded.",
-            ),
+            evidence=(f"Executable: {executable}", "Version command succeeded."),
         )
     )
 
@@ -163,40 +267,16 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 "DOCKER_DAEMON_AVAILABLE",
                 "PASS",
                 "Docker daemon is reachable.",
-                evidence=(f"Server version: {daemon.stdout.strip() or 'reported'}",),
+                evidence=("Docker info request succeeded.",),
             )
         )
 
-    compose_path = _compose_path(profile, root)
-    if compose_path is None:
+    if not compose_file_ready or compose_path is None:
         findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                "No Compose file was configured or discovered.",
-                remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
-            )
-        )
-        return
-    if not _inside_project(compose_path, root):
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_OUTSIDE_PROJECT",
-                "FAIL",
-                "Compose file resolves outside the selected project.",
-                evidence=(f"File: {compose_path}",),
-                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
-            )
-        )
-        return
-    if not compose_path.is_file():
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                f"Compose file not found: {compose_path.name}",
-                evidence=(f"Expected path: {compose_path}",),
-                remedy="Create the file or update compose_file in devdock.yaml.",
+            _compose_skipped(
+                "COMPOSE_CONFIG_SKIPPED",
+                "Compose config check",
+                "There is no safe, existing Compose file to validate.",
             )
         )
         return
@@ -256,20 +336,28 @@ def check_profile(
         declarations = tuple(
             f"{item.source}: {item.value}" for item in project_python.declarations
         )
-        current_executable = Path(sys.executable).resolve()
-        local_venv_interpreters = (
-            (root / ".venv" / "Scripts" / "python.exe").resolve(),
-            (root / ".venv" / "bin" / "python").resolve(),
+        current_executable = Path(os.path.abspath(sys.executable))
+        candidates = _project_python_interpreters(root)
+        selected = current_executable in candidates
+        version_text = (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         )
-        selected = current_executable in local_venv_interpreters
-        interpreter_evidence = (
-            "Project interpreter version: "
-            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
-        ) if selected else (
-            "DevDock interpreter version: "
-            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} "
-            "(target interpreter not inspected)",
-        )
+        interpreter_evidence: tuple[str, ...]
+        if selected:
+            interpreter_evidence = (
+                f"Target project executable: {current_executable}",
+                f"Target project version: {version_text}",
+            )
+        else:
+            configured_candidates = tuple(
+                f"Conventional interpreter candidate: {candidate}"
+                for candidate in candidates
+                if candidate.is_file()
+            )
+            interpreter_evidence = (
+                f"DevDock interpreter version: {version_text} (target not inspected)",
+                *configured_candidates,
+            )
         findings.append(
             _finding(
                 "PROJECT_PYTHON_METADATA",
@@ -284,7 +372,7 @@ def check_profile(
                 + interpreter_evidence,
                 remedy=None
                 if selected
-                else "Activate the project's .venv and rerun DevDock to check that interpreter.",
+                else "Activate the project's .venv, venv, or env and rerun DevDock to inspect it.",
             )
         )
     for error in project_python.errors:
@@ -307,7 +395,7 @@ def check_profile(
                     _finding(
                         "PYTHON_REQUIREMENT_UNSUPPORTED",
                         "FAIL",
-                        f"Unsupported Python requirement: {requirement}",
+                        "Unsupported Python requirement.",
                         remedy="Use a minimum version such as '>=3.12'.",
                     )
                 )
@@ -367,7 +455,7 @@ def check_profile(
                 _finding(
                     "COMPOSE_FILE_OUTSIDE_PROJECT",
                     "FAIL",
-                    "Compose file resolves outside the selected project.",
+                    "Compose file does not resolve inside the selected project.",
                     evidence=(f"File: {compose_path}",),
                     remedy="Remove the escaping symlink or choose a project-contained "
                     "Compose file.",
@@ -422,8 +510,18 @@ def check_profile(
             )
 
     for required_file in profile.required_files:
-        target = (root / required_file).resolve()
-        if not target.is_relative_to(root.resolve()):
+        target = _resolved_path(root / required_file)
+        project_root = _resolved_path(root)
+        if target is None or project_root is None:
+            findings.append(
+                _finding(
+                    "REQUIRED_FILE_UNRESOLVABLE",
+                    "FAIL",
+                    f"Required file path could not be resolved: {required_file}",
+                    remedy="Check for broken or looping symlinks in the required file path.",
+                )
+            )
+        elif not target.is_relative_to(project_root):
             findings.append(
                 _finding(
                     "REQUIRED_FILE_OUTSIDE_PROJECT",
@@ -449,8 +547,18 @@ def check_profile(
             )
 
     for required_dir in profile.required_dirs:
-        target = (root / required_dir).resolve()
-        if not target.is_relative_to(root.resolve()):
+        target = _resolved_path(root / required_dir)
+        project_root = _resolved_path(root)
+        if target is None or project_root is None:
+            findings.append(
+                _finding(
+                    "REQUIRED_DIRECTORY_UNRESOLVABLE",
+                    "FAIL",
+                    f"Required directory path could not be resolved: {required_dir}",
+                    remedy="Check for broken or looping symlinks in the required directory path.",
+                )
+            )
+        elif not target.is_relative_to(project_root):
             findings.append(
                 _finding(
                     "REQUIRED_DIRECTORY_OUTSIDE_PROJECT",
