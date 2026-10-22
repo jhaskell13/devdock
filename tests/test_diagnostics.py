@@ -1,4 +1,5 @@
 import socket
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +48,35 @@ def test_findings_have_stable_codes_and_interpreter_evidence(tmp_path: Path) -> 
     assert python_finding.evidence[0].startswith("Executable:")
     assert python_finding.evidence[1].startswith("Inspected version:")
     assert python_finding.doc_ref == "docs/cli.md#diagnostic-codes"
+
+
+def test_python_minimum_patch_version_is_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        diagnostics,
+        "sys",
+        SimpleNamespace(
+            version_info=SimpleNamespace(major=3, minor=12, micro=0),
+            executable=sys.executable,
+        ),
+    )
+
+    patch_required = check_profile(
+        ProjectProfile(
+            schema_version=1, project="sample", runtimes={"python": ">=3.12.1"}
+        ),
+        tmp_path,
+    )
+    minor_required = check_profile(
+        ProjectProfile(
+            schema_version=1, project="sample", runtimes={"python": ">=3.12"}
+        ),
+        tmp_path,
+    )
+
+    assert any(item.code == "PYTHON_VERSION_TOO_OLD" for item in patch_required)
+    assert any(item.code == "PYTHON_VERSION_OK" for item in minor_required)
 
 
 def test_project_interpreter_is_distinguished_from_devdock_interpreter(

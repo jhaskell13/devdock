@@ -32,7 +32,7 @@ The profile is UTF-8 YAML loaded with safe parsing. The root must be an object w
 | `required_dirs` | Optional list of project-relative directory paths with the same containment rules as `required_files`. |
 | `ports` | Optional distinct integer TCP ports from `1` through `65535`. Each is probed by binding `127.0.0.1`; this is a momentary check, not a reservation. |
 
-Unknown fields are errors. The schema does not load `.env`, expand variables, execute commands, or store state. Python requirements currently accept a simple minimum form such as `>=3.12`; the check compares it with the interpreter running DevDock. Docker accepts `compose` and separately checks the CLI/plugin, daemon reachability, and Compose config parser. Other runtime names or requirement forms produce a failed finding.
+Unknown fields are errors. The schema does not load `.env`, expand variables, execute commands, or store state. Python requirements currently accept a minimum such as `>=3.12` or `>=3.12.1`; the check compares major, minor, and patch versions with the interpreter running DevDock. Docker accepts `compose` and separately checks the CLI/plugin, daemon reachability, and Compose config parser. Other runtime names or requirement forms produce a failed finding.
 
 ## Output and exit behavior
 

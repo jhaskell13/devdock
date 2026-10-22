@@ -17,7 +17,7 @@ from devdock.config import ProjectProfile
 from devdock.discovery import COMPOSE_NAMES
 from devdock.metadata import read_python_metadata
 
-PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.\d+)?$")
+PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.(\d+))?$")
 Severity = Literal["PASS", "WARN", "FAIL"]
 
 
@@ -263,9 +263,11 @@ def check_profile(
         )
         selected = current_executable in local_venv_interpreters
         interpreter_evidence = (
-            f"Project interpreter version: {sys.version_info.major}.{sys.version_info.minor}",
+            "Project interpreter version: "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         ) if selected else (
-            f"DevDock interpreter version: {sys.version_info.major}.{sys.version_info.minor} "
+            "DevDock interpreter version: "
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro} "
             "(target interpreter not inspected)",
         )
         findings.append(
@@ -310,20 +312,28 @@ def check_profile(
                     )
                 )
                 continue
-            required = (int(match.group(1)), int(match.group(2)))
-            current = sys.version_info[:2]
+            required = (
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3) or 0),
+            )
+            current = (
+                sys.version_info.major,
+                sys.version_info.minor,
+                sys.version_info.micro,
+            )
             interpreter = str(Path(sys.executable).resolve())
             evidence = (
                 f"Executable: {interpreter}",
-                f"Inspected version: {current[0]}.{current[1]}",
+                f"Inspected version: {current[0]}.{current[1]}.{current[2]}",
             )
             if current < required:
                 findings.append(
                     _finding(
                         "PYTHON_VERSION_TOO_OLD",
                         "FAIL",
-                        f"Python {required[0]}.{required[1]} or newer is required; "
-                        f"found {current[0]}.{current[1]}.",
+                        f"Python {required[0]}.{required[1]}.{required[2]} or newer is required; "
+                        f"found {current[0]}.{current[1]}.{current[2]}.",
                         evidence=evidence,
                         remedy="Install the required Python version and rerun DevDock.",
                     )
@@ -333,7 +343,8 @@ def check_profile(
                     _finding(
                         "PYTHON_VERSION_OK",
                         "PASS",
-                        f"Python {current[0]}.{current[1]} meets the declared minimum.",
+                        f"Python {current[0]}.{current[1]}.{current[2]} meets "
+                        "the declared minimum.",
                         evidence=evidence,
                     )
                 )
