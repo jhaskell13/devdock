@@ -24,31 +24,37 @@ See [`docs/cli.md`](docs/cli.md) for exact discovery, output, and exit-code beha
 
 ## Install for development
 
-Clone the repository, then create and activate a virtual environment.
+Clone the repository, then run the setup script from the repository root. It uses the newest Python 3 installation available through the Windows `py` launcher (or `python` as a fallback), verifies that it is Python 3.12 or newer, creates `.venv` if needed, and installs DevDock with its development tools.
 
 **Windows PowerShell**
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+.\scripts\dev-setup.ps1
 ```
 
-**Linux or macOS**
+Run the full test suite separately:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+```
+
+If the existing `.venv` is broken or uses an older Python, recreate it explicitly with `.scripts\dev-setup.ps1 -Recreate`. This removes only the repository's `.venv` directory before rebuilding it. To select a Python version, use both flags, for example `.scripts\dev-setup.ps1 -Recreate -PythonSelector 3.15`.
+
+On Linux or macOS, create and install into a virtual environment with:
 
 ```sh
-python3.12 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv
+. .venv/bin/activate
 python -m pip install -e '.[dev]'
 ```
 
-Confirm the installation:
+Then run tests with `python -m pytest` while that environment is active. Confirm the installation:
 
 ```text
 devdock --help
 ```
 
-If `py -3.12` or `python3.12` is unavailable, install Python 3.12 or newer and make sure its launcher is on your `PATH`.
+DevDock requires Python 3.12 or newer. The setup script prints the available Python launcher options if it cannot find a suitable interpreter.
 
 ## Use DevDock in a project
 
@@ -148,12 +154,12 @@ Set it in the shell before launching DevDock. The current CLI checks the inherit
 
 ## Contributing and development checks
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local workflow. From an activated development environment, run:
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local workflow. From the repository root on Windows, run:
 
-```text
-python -m pytest
-python -m ruff check src tests
-python -m mypy src/devdock
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m mypy src/devdock
 ```
 
 DevDock is intended to use synthetic disposable projects for automated checks. Tests must not require production systems, customer records, real credentials, or access to a running Docker daemon unless a future integration suite explicitly documents an isolated disposable setup.
