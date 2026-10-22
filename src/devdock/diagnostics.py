@@ -262,6 +262,12 @@ def check_profile(
             (root / ".venv" / "bin" / "python").resolve(),
         )
         selected = current_executable in local_venv_interpreters
+        interpreter_evidence = (
+            f"Project interpreter version: {sys.version_info.major}.{sys.version_info.minor}",
+        ) if selected else (
+            f"DevDock interpreter version: {sys.version_info.major}.{sys.version_info.minor} "
+            "(target interpreter not inspected)",
+        )
         findings.append(
             _finding(
                 "PROJECT_PYTHON_METADATA",
@@ -272,8 +278,8 @@ def check_profile(
                     if selected
                     else "the target project's interpreter is not the interpreter running DevDock."
                 ),
-                evidence=declarations
-                + (f"DevDock executable: {current_executable}",),
+                evidence=declarations + (f"DevDock executable: {current_executable}",)
+                + interpreter_evidence,
                 remedy=None
                 if selected
                 else "Activate the project's .venv and rerun DevDock to check that interpreter.",

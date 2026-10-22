@@ -58,6 +58,22 @@ def test_inspect_reports_discovery_evidence_and_known_files(tmp_path: Path) -> N
     assert "Known project files: compose.yaml, pyproject.toml" in result.stdout
 
 
+def test_inspect_explains_nested_roots_and_unicode_paths(tmp_path: Path) -> None:
+    outer = tmp_path / "outer project"
+    inner = outer / "café"
+    inner.mkdir(parents=True)
+    (outer / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (inner / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: nested\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["inspect", str(inner)])
+
+    assert result.exit_code == 0
+    assert str(inner.resolve()) in result.stdout
+    assert "Nested project roots detected" in result.stdout
+
+
 def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
     directory_is_a_file = tmp_path / "not-a-directory"
     directory_is_a_file.write_text("file\n", encoding="utf-8")

@@ -49,6 +49,24 @@ def test_findings_have_stable_codes_and_interpreter_evidence(tmp_path: Path) -> 
     assert python_finding.doc_ref == "docs/cli.md#diagnostic-codes"
 
 
+def test_project_interpreter_is_distinguished_from_devdock_interpreter(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+
+    findings = check_profile(
+        ProjectProfile(schema_version=1, project="sample"), tmp_path
+    )
+
+    project_finding = next(
+        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
+    )
+    assert project_finding.severity == "WARN"
+    assert any("target interpreter not inspected" in item for item in project_finding.evidence)
+
+
 def test_environment_diagnostics_distinguish_unset_and_empty_without_values(
     tmp_path: Path,
 ) -> None:

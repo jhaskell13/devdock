@@ -57,3 +57,15 @@ def test_python_project_metadata_can_select_a_root_without_devDock_or_compose(
     assert result.root == root.resolve()
     assert result.matched_markers == ("pyproject.toml",)
 
+
+def test_discovery_handles_unicode_and_spaces_in_project_paths(tmp_path: Path) -> None:
+    root = tmp_path / "café project"
+    nested = root / "src folder"
+    nested.mkdir(parents=True)
+    (root / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = discover_project_result(nested)
+
+    assert result.root == root.resolve()
+    assert result.matched_markers == ("compose.yaml",)
+
