@@ -152,6 +152,7 @@ DevDock is intended to use synthetic disposable projects for automated checks. T
 ## Project plans
 
 [`ROADMAP.md`](ROADMAP.md) lays out the engineering and acceptance criteria needed to reach a carefully validated release.
+User-visible changes are tracked in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

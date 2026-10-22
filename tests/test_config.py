@@ -39,7 +39,13 @@ def test_reports_malformed_yaml(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "compose_file",
-    [Path("../outside.yaml"), Path("nested/../../outside.yaml"), Path("C:/private/compose.yaml")],
+    [
+        Path("../outside.yaml"),
+        Path("nested/../../outside.yaml"),
+        Path("C:/private/compose.yaml"),
+        Path("C:relative.yaml"),
+        Path("invalid\0path.yaml"),
+    ],
 )
 def test_rejects_compose_paths_outside_project(compose_file: Path) -> None:
     with pytest.raises(ValidationError, match="compose_file"):

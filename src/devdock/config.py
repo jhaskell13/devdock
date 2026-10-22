@@ -42,6 +42,8 @@ class ProjectProfile(BaseModel):
             return value
         raw_path = str(value)
         windows_path = PureWindowsPath(raw_path)
+        if "\0" in raw_path:
+            raise ValueError("compose_file must not contain a NUL character")
         if value.is_absolute() or windows_path.is_absolute() or windows_path.drive:
             raise ValueError("compose_file must be a relative path inside the project root")
         if ".." in value.parts or ".." in windows_path.parts:
