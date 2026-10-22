@@ -25,5 +25,8 @@ def test_missing_compose_file_is_reported(tmp_path: Path) -> None:
 
     findings = check_profile(profile, tmp_path)
 
-    assert any(finding.level == "FAIL" and "Compose file not found" in finding.message for finding in findings)
+    assert any(
+        finding.level == "FAIL" and "Compose file not found" in finding.message
+        for finding in findings
+    )
 

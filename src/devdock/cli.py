@@ -1,6 +1,7 @@
 """DevDock command-line interface."""
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -18,7 +19,7 @@ app = typer.Typer(
 
 @app.command()
 def init(
-    directory: Path = typer.Argument(Path.cwd(), help="Project directory to initialize."),
+    directory: Annotated[Path, typer.Argument(help="Project directory to initialize.")] = Path("."),
 ) -> None:
     """Create a starter DevDock profile in a project directory."""
 
@@ -46,7 +47,7 @@ def init(
 
 @app.command()
 def inspect(
-    directory: Path = typer.Argument(Path.cwd(), help="Directory to inspect."),
+    directory: Annotated[Path, typer.Argument(help="Directory to inspect.")] = Path("."),
 ) -> None:
     """Discover the project root and report common environment files."""
 
@@ -72,7 +73,7 @@ def inspect(
 
 @app.command()
 def check(
-    directory: Path = typer.Argument(Path.cwd(), help="Project directory to check."),
+    directory: Annotated[Path, typer.Argument(help="Project directory to check.")] = Path("."),
 ) -> None:
     """Validate the project profile and check its declared prerequisites."""
 

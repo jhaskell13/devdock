@@ -27,11 +27,11 @@ devdock inspect
 devdock check
 ```
 
-`devdock init` creates `devdock.yaml`. `inspect` reports the discovered project files. `check` validates the profile and checks declared local prerequisites. It does not start containers or modify the host environment.
+`devdock init` creates `devdock.yaml`. `inspect` reports the discovered project files. `check` validates the profile and checks declared local prerequisites. It does not start containers or modify the host environment. Required environment variable names are checked against the current process environment; DevDock does not load or print `.env` values.
 
 ## Project profile
 
-See [`devdock.example.yaml`](devdock.example.yaml) for the initial profile format. The profile may declare Python and Docker Compose requirements, a Compose file, and required environment variable **names**. Secret values belong in a local `.env` file and must never be committed.
+See [`devdock.example.yaml`](devdock.example.yaml) and [`docs/architecture.md`](docs/architecture.md) for the initial profile format and design. The profile may declare Python and Docker Compose requirements, a Compose file, and required environment variable **names**. Secret values belong in a local `.env` file and must never be committed.
 
 ## Roadmap
 

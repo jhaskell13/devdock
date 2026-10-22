@@ -99,7 +99,9 @@ def check_profile(profile: ProjectProfile, root: Path) -> list[Finding]:
                     )
                 )
             else:
-                findings.append(Finding("PASS", result.stdout.strip() or "Docker Compose is available."))
+                findings.append(
+                    Finding("PASS", result.stdout.strip() or "Docker Compose is available.")
+                )
         else:
             findings.append(
                 Finding(
