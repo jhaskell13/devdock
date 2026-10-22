@@ -1,0 +1,105 @@
+"""DevDock command-line interface."""
+
+from pathlib import Path
+
+import typer
+
+from devdock.config import ProfileError, load_profile
+from devdock.diagnostics import check_profile
+from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project
+
+app = typer.Typer(
+    name="devdock",
+    help="Inspect and check local development environments.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@app.command()
+def init(
+    directory: Path = typer.Argument(Path.cwd(), help="Project directory to initialize."),
+) -> None:
+    """Create a starter DevDock profile in a project directory."""
+
+    root = directory.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    profile_path = root / CONFIG_NAME
+    if profile_path.exists():
+        typer.echo(f"Profile already exists: {profile_path}", err=True)
+        raise typer.Exit(code=1)
+    profile_path.write_text(
+        "\n".join(
+            (
+                "schema_version: 1",
+                f"project: {root.name or 'my-project'}",
+                "runtimes: {}",
+                "compose_file: null",
+                "required_env: []",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(f"Created {profile_path}")
+
+
+@app.command()
+def inspect(
+    directory: Path = typer.Argument(Path.cwd(), help="Directory to inspect."),
+) -> None:
+    """Discover the project root and report common environment files."""
+
+    root = discover_project(directory)
+    typer.echo(f"Project root: {root}")
+    profile = root / CONFIG_NAME
+    typer.echo(f"DevDock profile: {'found' if profile.is_file() else 'missing'}")
+    compose_files = [name for name in COMPOSE_NAMES if (root / name).is_file()]
+    if compose_files:
+        for name in compose_files:
+            typer.echo(f"Compose file: {name}")
+    else:
+        typer.echo("Compose file: none found")
+    if profile.is_file():
+        try:
+            loaded = load_profile(profile)
+        except ProfileError as exc:
+            typer.echo(f"Profile error: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Configured project: {loaded.project}")
+        typer.echo(f"Declared runtimes: {', '.join(loaded.runtimes) or 'none'}")
+
+
+@app.command()
+def check(
+    directory: Path = typer.Argument(Path.cwd(), help="Project directory to check."),
+) -> None:
+    """Validate the project profile and check its declared prerequisites."""
+
+    root = discover_project(directory)
+    profile_path = root / CONFIG_NAME
+    if not profile_path.is_file():
+        typer.echo(f"FAIL: {CONFIG_NAME} was not found in {root}", err=True)
+        typer.echo("Run 'devdock init' to create a starter profile.", err=True)
+        raise typer.Exit(code=1)
+    try:
+        profile = load_profile(profile_path)
+    except ProfileError as exc:
+        typer.echo(f"FAIL: Invalid {CONFIG_NAME}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    findings = check_profile(profile, root)
+    failures = 0
+    for finding in findings:
+        typer.echo(f"[{finding.level}] {finding.message}")
+        if finding.remedy:
+            typer.echo(f"       Suggested action: {finding.remedy}")
+        if finding.level == "FAIL":
+            failures += 1
+    if failures:
+        raise typer.Exit(code=1)
+
+
+if __name__ == "__main__":
+    app()
+
