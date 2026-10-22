@@ -5,4 +5,7 @@ runtimes:
   docker: "compose"
 compose_file: compose.yaml
 required_env: []
+required_files: []
+required_dirs: []
+ports: []
 

@@ -20,7 +20,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 | Milestone | Result |
 | --- | --- |
 | 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
-| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
+| 1. Discovery and diagnostics (in progress) | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
 | 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
 | 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
 | 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
@@ -39,14 +39,16 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 1. Discovery and diagnostics
 
-- Replace ad hoc project discovery with a tested discovery result describing the selected root and evidence used.
-- Detect ambiguous nested roots and report how to select an explicit project directory.
-- Inspect common Compose filenames, Python project metadata, lockfiles, environment templates, and known runtime manifests without reading secret values.
-- Expand Python checks to distinguish the DevDock interpreter from the target project's interpreter; identify which executable and version were inspected.
-- Check Docker CLI, Compose plugin, daemon reachability, and Compose file parsing as separate findings.
-- Validate configured ports, port collisions, required files, expected directories, and environment-variable names.
-- Make environment-variable diagnostics redact values and distinguish unset from empty where the profile requests that distinction.
-- Introduce a stable finding model: code, severity, summary, evidence, remediation, and optional documentation reference.
+**Status:** In progress. Implemented so far: a discovery result with marker evidence, nearest-root selection, nested-root reporting, and filename-only manifest inventory; bounded Python version metadata reads; structured finding fields and stable codes; Python executable/version evidence and a warning when the DevDock interpreter is not the project's `.venv`; separate Docker CLI, daemon, and Compose parser checks; required-file/directory checks with resolved symlink containment; distinct unset/empty environment findings; and loopback port probes. The remaining bullets below are planned work and the acceptance criteria have not yet been met.
+
+- [x] Replace ad hoc project discovery with a tested discovery result describing the selected root and evidence used.
+- [x] Detect nested marked roots and report that the nearest one wins plus how to select another project directory.
+- [x] Read bounded Python version declarations from `pyproject.toml`, `.python-version`, and `.tool-versions`; inventory other common manifests and lockfiles by filename only. Continue adding safe metadata readers only for fields needed by diagnostics.
+- [ ] Distinguish the DevDock interpreter from the target project's configured interpreter and report both executable/version pairs when available.
+- [x] Check Docker CLI, Compose plugin, daemon reachability, and Compose file parsing as separate findings.
+- [x] Validate profile-configured ports, port collisions on loopback, required files, and expected directories.
+- [x] Make environment-variable diagnostics redact values and distinguish unset from empty.
+- [x] Introduce a finding model with code, severity, summary, evidence, remediation, and documentation reference.
 - Add failure categories and consistent exit-code rules, including warnings and partial checks.
 - Add synthetic fixture projects for valid, missing, malformed, nested, ambiguous, unsupported, and platform-specific cases.
 - Test command output with paths containing spaces, Unicode, and Windows path separators.

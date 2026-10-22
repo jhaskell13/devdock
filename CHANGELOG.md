@@ -6,7 +6,8 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
-- Project discovery evidence, nearest-root ambiguity reporting, and filename-only inventory of common language manifests, lockfiles, Compose files, and environment templates.
+- Structured discovery evidence, nested-root reporting, and safe project manifest/Python metadata inspection.
+- Coded diagnostics for Python interpreter evidence, Docker/Compose availability and parsing, required paths, environment state, and TCP ports.
 - `devdock init`, `devdock inspect`, and `devdock check` for local project profiles.
 - Version 1 YAML profile validation and read-only checks for declared Python, Docker Compose, Compose file, and environment-name requirements.
 - CLI behavior, architecture, installation, contribution, and security documentation.

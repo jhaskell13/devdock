@@ -9,8 +9,8 @@ The repository foundation milestone is complete. The current CLI can create a pr
 | Command | What it does | Changes the project or host? |
 | --- | --- | --- |
 | `devdock init [DIRECTORY]` | Creates a starter `devdock.yaml`. The directory defaults to the current directory. | Creates one profile file. |
-| `devdock inspect [DIRECTORY]` | Finds the nearest project profile or common Compose file and reports what it found. | No. |
-| `devdock check [DIRECTORY]` | Validates the profile and compares the running Python interpreter with its declared minimum; checks Docker Compose CLI, Compose file, and required environment variable names. | No. |
+| `devdock inspect [DIRECTORY]` | Finds the nearest project profile or common Compose file, reports the marker used, nested roots, and known project files. | No. |
+| `devdock check [DIRECTORY]` | Validates the profile and checks declared Python, Docker/Compose, paths, ports, and environment requirements. | No. |
 | `devdock --help` | Shows available commands and options. | No. |
 
 See [`docs/cli.md`](docs/cli.md) for exact discovery, output, and exit-code behavior.
@@ -68,7 +68,7 @@ devdock inspect path/to/project
 devdock check path/to/project
 ```
 
-`inspect` and `check` search upward from the supplied directory for the nearest `devdock.yaml` or common Compose file. `init` creates `devdock.yaml` in the directory you pass; it refuses to overwrite an existing profile.
+`inspect` and `check` search upward from the supplied directory for the nearest `devdock.yaml`, common Compose file, or supported project manifest. `inspect` reports the evidence and inventories known project files. `init` creates `devdock.yaml` in the directory you pass; it refuses to overwrite an existing profile.
 
 ### Configure `devdock.yaml`
 
@@ -83,6 +83,12 @@ runtimes:
 compose_file: compose.yaml
 required_env:
   - APP_MODE
+required_files:
+  - pyproject.toml
+required_dirs:
+  - src
+ports:
+  - 8000
 ```
 
 The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml); field behavior and design limits are described in [`docs/architecture.md`](docs/architecture.md).
@@ -91,9 +97,12 @@ The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml
 | --- | --- | --- |
 | `schema_version` | Yes | Must be the integer `1`. |
 | `project` | Yes | A non-empty display name. |
-| `runtimes` | No | A mapping of supported runtime identifiers to requirements. `python` accepts a minimum such as `>=3.12`; `docker` accepts `compose`. Unknown runtime identifiers are reported as unsupported. |
-| `compose_file` | No | A forward-slash path relative to the project root; absolute paths and lexical `..` traversal are rejected. `check` verifies that the file exists. |
-| `required_env` | No | Names that must be set in the environment inherited by DevDock. Values are never displayed. |
+| `runtimes` | No | A mapping of supported runtime identifiers to requirements. `python` accepts a minimum such as `>=3.12`; `docker` accepts `compose`. Python checks report DevDock's executable and version. Unknown runtime identifiers are reported as unsupported. |
+| `compose_file` | No | A forward-slash path relative to the project root; absolute paths and lexical `..` traversal are rejected. `check` verifies that the file exists and resolves inside the project. |
+| `required_env` | No | Names that must be set to a non-empty value in the environment inherited by DevDock. Unset and empty values are distinguished; values are never displayed. |
+| `required_files` | No | Project-relative files that must exist. Absolute paths, backslashes, and lexical traversal are rejected. |
+| `required_dirs` | No | Project-relative directories that must exist. Symlinks resolving outside the project fail the check. |
+| `ports` | No | TCP ports from 1 through 65535 to probe on `127.0.0.1`. Availability is a point-in-time observation and may change immediately. |
 
 Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands.
 
@@ -113,11 +122,11 @@ Do not commit real credentials, `.env` files, customer data, or other sensitive 
 
 ## Results and exit codes
 
-- Exit code `0`: the profile is valid and all checks it declares passed.
+- Exit code `0`: the profile is valid and no check failed. Warnings may be present when DevDock cannot verify the target project's interpreter.
 - Exit code `1`: the profile is missing or invalid, or at least one check failed. Findings include a suggested action when DevDock can provide one.
 - CLI usage errors use Typer's argument parsing exit behavior.
 
-The checks are local diagnostics, not a guarantee that an application will start. Docker daemon health, service readiness, networking, volumes, and teardown are future roadmap work.
+The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Docker daemon health beyond a basic `docker info` request, service readiness, networking, volumes, and teardown remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).
 
 ## Troubleshooting
 

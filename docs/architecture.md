@@ -14,13 +14,15 @@ Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
 
 Diagnostics
-  ├─ declared Python minimum
-  ├─ Docker Compose CLI availability
-  ├─ configured Compose file
-  └─ required environment variable names
+  ├─ structured findings with stable code, severity, evidence, and remediation
+  ├─ declared Python minimum and exact DevDock interpreter
+  ├─ Docker CLI/plugin, daemon, and Compose parsing as separate checks
+  ├─ configured and required project paths with symlink containment
+  ├─ required environment names without exposing values
+  └─ loopback TCP port availability probes
 ```
 
-`discovery.py` locates the nearest ancestor with `devdock.yaml` or a common Compose filename. `config.py` owns the profile schema and parsing errors. `diagnostics.py` returns structured findings; the CLI is responsible for rendering them and choosing the process exit code.
+`discovery.py` locates the nearest ancestor with a DevDock profile, common Compose filename, or supported project manifest and returns the evidence, marked ancestors, and filename-only inventory. `metadata.py` reads bounded, project-contained Python version declarations from `pyproject.toml`, `.python-version`, and `.tool-versions`; it does not execute project code or read environment templates. `config.py` owns the profile schema and parsing errors. `diagnostics.py` returns structured findings; the CLI renders them and chooses the process exit code. Runtime output that may contain interpolated values is not included in findings.
 
 ## Profile contract, version 1
 
@@ -31,6 +33,8 @@ The root YAML object has these fields:
 - `runtimes`: optional mapping of runtime identifiers to requirements. The first checks support `python: ">=X.Y"` and `docker: "compose"`.
 - `compose_file`: optional project-relative Compose file path. Absolute paths, drive-qualified paths, backslashes, and lexical `..` traversal are rejected. Symlink-aware containment remains future work before this path is used for mutations.
 - `required_env`: optional list of environment variable names. DevDock checks whether each name is set in its process environment and never prints values.
+- `required_files` and `required_dirs`: optional project-relative filesystem paths. Lexical traversal and resolved symlinks outside the project are rejected by checks.
+- `ports`: optional distinct TCP ports to probe on loopback; results are momentary observations.
 
 Unknown fields are rejected so typos do not silently weaken a check. Profile values contain configuration only; credentials remain in the user's local environment.
 
