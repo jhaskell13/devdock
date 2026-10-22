@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an improvement to DevDock.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Describe a local development workflow. Do not include confidential project information,
+        credentials, or real customer/personal data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What task is difficult or error-prone today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain what DevDock should do and how a user would invoke it.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and safety considerations
+      description: Include other approaches and any effect on files, containers, volumes, or secrets.
+

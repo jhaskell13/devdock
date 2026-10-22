@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem in DevDock.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include credentials, real customer/personal data, production details, or confidential project files.
+        Use a synthetic project when describing a reproduction.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the behavior and why it appears incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the command and the smallest synthetic profile or project that reproduces it.
+      placeholder: |
+        1. Create a temporary project with ...
+        2. Run `devdock ...`
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Remove usernames, private paths, tokens, and other sensitive details before posting.
+      render: text
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"
+    validations:
+      required: true
+  - type: input
+    id: devdock-version
+    attributes:
+      label: DevDock version or commit
+      placeholder: "0.1.0 or commit SHA"
+    validations:
+      required: true
+
