@@ -20,3 +20,39 @@ def test_init_inspect_and_check_work_as_a_minimal_path(tmp_path: Path) -> None:
     assert checked.exit_code == 0
     assert "[PASS] Profile is valid" in checked.stdout
 
+
+def test_init_never_overwrites_an_existing_profile(tmp_path: Path) -> None:
+    profile_path = tmp_path / "devdock.yaml"
+    profile_path.write_text("user content\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert profile_path.read_text(encoding="utf-8") == "user content\n"
+
+
+def test_check_requires_a_profile(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "devdock.yaml was not found" in result.stderr
+
+
+def test_inspect_reports_invalid_profile(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 99\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["inspect", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "Profile error:" in result.stderr
+
+
+def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
+    directory_is_a_file = tmp_path / "not-a-directory"
+    directory_is_a_file.write_text("file\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(directory_is_a_file / "child")])
+
+    assert result.exit_code == 1
+    assert "Could not create project directory" in result.stderr
+

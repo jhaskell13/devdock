@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from devdock.config import ProfileError, load_profile
+from devdock.config import ProfileError, ProjectProfile, load_profile
 
 
 def test_loads_valid_profile(tmp_path: Path) -> None:
@@ -34,4 +35,22 @@ def test_reports_malformed_yaml(tmp_path: Path) -> None:
 
     with pytest.raises(ProfileError):
         load_profile(profile_path)
+
+
+@pytest.mark.parametrize(
+    "compose_file",
+    [Path("../outside.yaml"), Path("nested/../../outside.yaml"), Path("C:/private/compose.yaml")],
+)
+def test_rejects_compose_paths_outside_project(compose_file: Path) -> None:
+    with pytest.raises(ValidationError, match="compose_file"):
+        ProjectProfile.model_validate(
+            {"schema_version": 1, "project": "sample", "compose_file": compose_file}
+        )
+
+
+def test_rejects_windows_separators_for_portable_paths() -> None:
+    with pytest.raises(ValidationError, match="forward slashes"):
+        ProjectProfile.model_validate(
+            {"schema_version": 1, "project": "sample", "compose_file": r"sub\compose.yaml"}
+        )
 

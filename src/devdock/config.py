@@ -1,6 +1,6 @@
 """Loading and validation for a project's DevDock profile."""
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 import yaml
@@ -33,6 +33,21 @@ class ProjectProfile(BaseModel):
                 raise ValueError("runtime names must be non-empty lowercase identifiers")
             if not requirement.strip():
                 raise ValueError(f"runtime requirement for {name!r} must not be empty")
+        return value
+
+    @field_validator("compose_file")
+    @classmethod
+    def compose_file_must_stay_inside_project(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return value
+        raw_path = str(value)
+        windows_path = PureWindowsPath(raw_path)
+        if value.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+            raise ValueError("compose_file must be a relative path inside the project root")
+        if ".." in value.parts or ".." in windows_path.parts:
+            raise ValueError("compose_file must not escape the project root")
+        if "\\" in raw_path:
+            raise ValueError("compose_file must use forward slashes for cross-platform paths")
         return value
 
     @field_validator("required_env")

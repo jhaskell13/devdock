@@ -24,24 +24,31 @@ def init(
     """Create a starter DevDock profile in a project directory."""
 
     root = directory.resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        typer.echo(f"Could not create project directory {root}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     profile_path = root / CONFIG_NAME
-    if profile_path.exists():
-        typer.echo(f"Profile already exists: {profile_path}", err=True)
-        raise typer.Exit(code=1)
-    profile_path.write_text(
-        "\n".join(
-            (
-                "schema_version: 1",
-                f"project: {root.name or 'my-project'}",
-                "runtimes: {}",
-                "compose_file: null",
-                "required_env: []",
-                "",
-            )
-        ),
-        encoding="utf-8",
+    starter_profile = "\n".join(
+        (
+            "schema_version: 1",
+            f"project: {root.name or 'my-project'}",
+            "runtimes: {}",
+            "compose_file: null",
+            "required_env: []",
+            "",
+        )
     )
+    try:
+        with profile_path.open("x", encoding="utf-8") as profile_file:
+            profile_file.write(starter_profile)
+    except FileExistsError as exc:
+        typer.echo(f"Profile already exists: {profile_path}", err=True)
+        raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        typer.echo(f"Could not write profile {profile_path}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"Created {profile_path}")
 
 
