@@ -7,7 +7,7 @@ import typer
 
 from devdock.config import ProfileError, load_profile
 from devdock.diagnostics import check_profile
-from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project
+from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
 
 app = typer.Typer(
     name="devdock",
@@ -58,8 +58,15 @@ def inspect(
 ) -> None:
     """Discover the project root and report common environment files."""
 
-    root = discover_project(directory)
+    discovery = discover_project_result(directory)
+    root = discovery.root
     typer.echo(f"Project root: {root}")
+    typer.echo(f"Discovery evidence: {', '.join(discovery.matched_markers) or 'no marker; used start directory'}")
+    if discovery.ambiguous:
+        typer.echo(
+            "Nested project roots detected; using the nearest root. "
+            "Pass a directory inside the intended project to select it."
+        )
     profile = root / CONFIG_NAME
     typer.echo(f"DevDock profile: {'found' if profile.is_file() else 'missing'}")
     compose_files = [name for name in COMPOSE_NAMES if (root / name).is_file()]
@@ -68,6 +75,7 @@ def inspect(
             typer.echo(f"Compose file: {name}")
     else:
         typer.echo("Compose file: none found")
+    typer.echo(f"Known project files: {', '.join(discovery.known_files) or 'none found'}")
     if profile.is_file():
         try:
             loaded = load_profile(profile)
@@ -84,7 +92,8 @@ def check(
 ) -> None:
     """Validate the project profile and check its declared prerequisites."""
 
-    root = discover_project(directory)
+    discovery = discover_project_result(directory)
+    root = discovery.root
     profile_path = root / CONFIG_NAME
     if not profile_path.is_file():
         typer.echo(f"FAIL: {CONFIG_NAME} was not found in {root}", err=True)

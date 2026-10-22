@@ -11,7 +11,9 @@ This page describes behavior currently implemented by DevDock. Options may be ad
 | `devdock check [DIRECTORY]` | `.` | Finds the nearest project root, requires `devdock.yaml`, validates it, then runs the checks declared by that profile. |
 | `devdock --help` | — | Lists commands and options. Each command also accepts `--help`. |
 
-`init` uses exactly the directory supplied; it does not search parent directories. `inspect` and `check` start at the supplied directory, resolve it to an absolute path, then walk upward. The first directory containing `devdock.yaml` or one of `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` is selected. If no marker exists, the supplied directory is used as the root. When a profile and Compose file are both present at the same level, that directory is selected.
+`init` uses exactly the directory supplied; it does not search parent directories. `inspect` and `check` start at the supplied directory, resolve it to an absolute path, then walk upward. The first directory containing `devdock.yaml` or one of `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml` is selected. If no marker exists, the supplied directory is used as the root. When a profile and Compose file are both present at the same level, that directory is selected. `inspect` prints the marker that selected the root and inventories known project manifests and lockfiles by filename only. It never reads `.env` or other secret-bearing files for inventory.
+
+If a project marker also exists above the selected root, `inspect` reports nested roots and explains that the nearest root wins. To select another nested project, pass a directory inside that project. The inventory recognizes common Compose names, Python metadata and lockfiles, environment templates, and Node, Rust, and Go manifests; this list is descriptive and does not imply runtime support.
 
 `inspect` succeeds if no profile is found; it reports that the profile is missing. It fails if a discovered profile is invalid. `check` requires a valid profile, even if a Compose file was what caused discovery to select that root.
 

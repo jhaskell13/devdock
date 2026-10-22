@@ -47,6 +47,17 @@ def test_inspect_reports_invalid_profile(tmp_path: Path) -> None:
     assert "Profile error:" in result.stderr
 
 
+def test_inspect_reports_discovery_evidence_and_known_files(tmp_path: Path) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='sample'\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["inspect", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Discovery evidence: compose.yaml" in result.stdout
+    assert "Known project files: compose.yaml, pyproject.toml" in result.stdout
+
+
 def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
     directory_is_a_file = tmp_path / "not-a-directory"
     directory_is_a_file.write_text("file\n", encoding="utf-8")
