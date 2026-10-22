@@ -22,6 +22,7 @@ Run the checks from the repository root:
 python -m pytest
 python -m ruff check src tests
 python -m mypy src/devdock
+python -m build
 ```
 
 Add or update tests when behavior changes. Prefer synthetic temporary project directories and fake adapters. Unit tests must not require a running Docker daemon, real credentials, personal data, or access to production systems.
