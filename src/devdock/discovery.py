@@ -33,6 +33,14 @@ PROJECT_FILES = (
     ".env.example",
     ".env.template",
 )
+ROOT_MARKERS = (
+    CONFIG_NAME,
+    *COMPOSE_NAMES,
+    "pyproject.toml",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+)
 
 
 @dataclass(frozen=True)
@@ -62,7 +70,7 @@ def discover_project_result(start: Path) -> DiscoveryResult:
     for candidate in candidates:
         markers = tuple(
             name
-            for name in (CONFIG_NAME, *COMPOSE_NAMES)
+            for name in ROOT_MARKERS
             if (candidate / name).is_file()
         )
         if markers:
@@ -74,7 +82,7 @@ def discover_project_result(start: Path) -> DiscoveryResult:
         for candidate in candidates
         if candidate != root
         and len(candidate.parts) < len(root.parts)
-        and any((candidate / name).is_file() for name in (CONFIG_NAME, *COMPOSE_NAMES))
+        and any((candidate / name).is_file() for name in ROOT_MARKERS)
     )
     files = tuple(name for name in PROJECT_FILES if (root / name).is_file())
     return DiscoveryResult(resolved_start, root, matched, ancestors, files)

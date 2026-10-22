@@ -8,6 +8,7 @@ import typer
 from devdock.config import ProfileError, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
+from devdock.metadata import read_python_metadata
 
 app = typer.Typer(
     name="devdock",
@@ -61,7 +62,8 @@ def inspect(
     discovery = discover_project_result(directory)
     root = discovery.root
     typer.echo(f"Project root: {root}")
-    typer.echo(f"Discovery evidence: {', '.join(discovery.matched_markers) or 'no marker; used start directory'}")
+    evidence = ", ".join(discovery.matched_markers) or "no marker; used start directory"
+    typer.echo(f"Discovery evidence: {evidence}")
     if discovery.ambiguous:
         typer.echo(
             "Nested project roots detected; using the nearest root. "
@@ -76,6 +78,11 @@ def inspect(
     else:
         typer.echo("Compose file: none found")
     typer.echo(f"Known project files: {', '.join(discovery.known_files) or 'none found'}")
+    python_metadata = read_python_metadata(root)
+    for declaration in python_metadata.declarations:
+        typer.echo(f"Python project metadata: {declaration.source} = {declaration.value}")
+    for error in python_metadata.errors:
+        typer.echo(f"Python project metadata warning: {error}")
     if profile.is_file():
         try:
             loaded = load_profile(profile)
@@ -108,10 +115,12 @@ def check(
     findings = check_profile(profile, root)
     failures = 0
     for finding in findings:
-        typer.echo(f"[{finding.level}] {finding.message}")
+        typer.echo(f"[{finding.severity}] {finding.code}: {finding.summary}")
+        for evidence in finding.evidence:
+            typer.echo(f"       Evidence: {evidence}")
         if finding.remedy:
             typer.echo(f"       Suggested action: {finding.remedy}")
-        if finding.level == "FAIL":
+        if finding.severity == "FAIL":
             failures += 1
     if failures:
         raise typer.Exit(code=1)

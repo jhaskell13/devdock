@@ -18,7 +18,7 @@ def test_init_inspect_and_check_work_as_a_minimal_path(tmp_path: Path) -> None:
 
     checked = runner.invoke(app, ["check", str(tmp_path)])
     assert checked.exit_code == 0
-    assert "[PASS] Profile is valid" in checked.stdout
+    assert "[PASS] PROFILE_VALID: Profile is valid" in checked.stdout
 
 
 def test_init_never_overwrites_an_existing_profile(tmp_path: Path) -> None:

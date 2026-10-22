@@ -1,7 +1,7 @@
 """Loading and validation for a project's DevDock profile."""
 
 from pathlib import Path, PureWindowsPath
-from typing import Literal
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -17,6 +17,9 @@ class ProjectProfile(BaseModel):
     runtimes: dict[str, str] = Field(default_factory=dict)
     compose_file: Path | None = None
     required_env: list[str] = Field(default_factory=list)
+    required_files: list[Path] = Field(default_factory=list)
+    required_dirs: list[Path] = Field(default_factory=list)
+    ports: list[Annotated[int, Field(strict=True, ge=1, le=65535)]] = Field(default_factory=list)
 
     @field_validator("project")
     @classmethod
@@ -58,6 +61,33 @@ class ProjectProfile(BaseModel):
         for name in value:
             if not name.isidentifier():
                 raise ValueError(f"{name!r} is not a valid environment variable name")
+        return value
+
+    @field_validator("required_files", "required_dirs")
+    @classmethod
+    def required_paths_must_stay_inside_project(cls, value: list[Path]) -> list[Path]:
+        for path in value:
+            raw_path = str(path)
+            windows_path = PureWindowsPath(raw_path)
+            if (
+                "\0" in raw_path
+                or path.is_absolute()
+                or windows_path.is_absolute()
+                or windows_path.drive
+                or ".." in path.parts
+                or ".." in windows_path.parts
+                or "\\" in raw_path
+            ):
+                raise ValueError(
+                    "required paths must be relative, project-contained forward-slash paths"
+                )
+        return value
+
+    @field_validator("ports")
+    @classmethod
+    def ports_must_not_repeat(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != len(value):
+            raise ValueError("ports must not contain duplicates")
         return value
 
 

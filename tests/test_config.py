@@ -60,3 +60,26 @@ def test_rejects_windows_separators_for_portable_paths() -> None:
             {"schema_version": 1, "project": "sample", "compose_file": r"sub\compose.yaml"}
         )
 
+
+@pytest.mark.parametrize("path", ["../outside", "C:/outside", r"nested\file"])
+def test_rejects_unsafe_required_paths(path: str) -> None:
+    with pytest.raises(ValidationError, match="required paths"):
+        ProjectProfile.model_validate(
+            {"schema_version": 1, "project": "sample", "required_files": [path]}
+        )
+
+
+@pytest.mark.parametrize("port", [0, 65536, True, "8080"])
+def test_rejects_invalid_ports(port: object) -> None:
+    with pytest.raises(ValidationError):
+        ProjectProfile.model_validate(
+            {"schema_version": 1, "project": "sample", "ports": [port]}
+        )
+
+
+def test_rejects_duplicate_ports() -> None:
+    with pytest.raises(ValidationError, match="duplicates"):
+        ProjectProfile.model_validate(
+            {"schema_version": 1, "project": "sample", "ports": [8080, 8080]}
+        )
+
