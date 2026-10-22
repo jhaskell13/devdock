@@ -92,7 +92,7 @@ The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml
 | `schema_version` | Yes | Must be the integer `1`. |
 | `project` | Yes | A non-empty display name. |
 | `runtimes` | No | A mapping of supported runtime identifiers to requirements. `python` accepts a minimum such as `>=3.12`; `docker` accepts `compose`. Unknown runtime identifiers are reported as unsupported. |
-| `compose_file` | No | A path relative to the project root; `check` verifies that the file exists. |
+| `compose_file` | No | A forward-slash path relative to the project root; absolute paths and lexical `..` traversal are rejected. `check` verifies that the file exists. |
 | `required_env` | No | Names that must be set in the environment inherited by DevDock. Values are never displayed. |
 
 Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands.

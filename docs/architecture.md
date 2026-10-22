@@ -1,6 +1,6 @@
 # Initial architecture
 
-DevDock starts as a Python CLI for inspecting and checking one local project. The first increment keeps commands read-only except for `init`, which only creates a profile file.
+DevDock starts as a Python CLI for inspecting and checking one local project. The first increment keeps commands read-only except for `init`, which creates the target directory when needed and writes a profile file.
 
 ## Runtime flow
 
@@ -29,7 +29,7 @@ The root YAML object has these fields:
 - `schema_version`: required integer, currently `1`.
 - `project`: required non-empty project name.
 - `runtimes`: optional mapping of runtime identifiers to requirements. The first checks support `python: ">=X.Y"` and `docker: "compose"`.
-- `compose_file`: optional project-relative Compose file path.
+- `compose_file`: optional project-relative Compose file path. Absolute paths, drive-qualified paths, backslashes, and lexical `..` traversal are rejected. Symlink-aware containment remains future work before this path is used for mutations.
 - `required_env`: optional list of environment variable names. DevDock checks whether each name is set in its process environment and never prints values.
 
 Unknown fields are rejected so typos do not silently weaken a check. Profile values contain configuration only; credentials remain in the user's local environment.
