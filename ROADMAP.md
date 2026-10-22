@@ -2,7 +2,7 @@
 
 This roadmap describes the engineering scope to turn the first CLI prototype into a reliable, documented, cross-platform local development tool. It is deliberately broader than the shortest path to a demo: the difficult work is safe lifecycle management, recovery from partial failures, clear diagnostics, and verifying behavior across real operating systems and disposable projects.
 
-The current estimate is **180–250 engineering hours**. This is a planning range, not a promise of program eligibility or paid time. It includes implementation, design, code review, tests, documentation, packaging, and platform validation. AI assistance can speed up individual tasks, but it does not remove the need to understand failures, inspect generated code, and verify behavior on the target systems.
+The plan includes implementation, design, code review, tests, documentation, packaging, and platform validation. AI assistance can speed up individual tasks, but it does not remove the need to understand failures, inspect generated code, and verify behavior on the target systems.
 
 ## Product principles
 
@@ -15,26 +15,23 @@ The current estimate is **180–250 engineering hours**. This is a planning rang
 - Prefer recoverable state transitions and idempotent commands over hidden background behavior.
 - Keep the first user interface as a CLI; defer a web dashboard and product-embedded AI features.
 
-## Milestones and estimates
+## Milestones
 
-| Milestone | Estimate | Result |
-| --- | ---: | --- |
-| 0. Repository and CLI contract | 12–18 h | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
-| 1. Discovery and diagnostics | 18–26 h | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
-| 2. Compose adapter and lifecycle | 26–36 h | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
-| 3. Readiness and dependency orchestration | 20–28 h | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
-| 4. State, recovery, and safe cleanup | 24–34 h | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
-| 5. Drift and environment snapshots | 16–24 h | Compare declared environment with captured local state and explain meaningful changes. |
-| 6. Profiles and runtime adapter expansion | 18–28 h | Multiple named profiles and a tested adapter boundary for additional local runtimes. |
-| 7. Packaging, compatibility, and release quality | 28–40 h | Installable release, supported-platform matrix, polished docs, upgrade path, and release checks. |
-| 8. Hardening and usability validation | 18–26 h | Fault injection, usability passes, performance checks, security review, and release candidate fixes. |
-| **Total** | **180–260 h** | **A release candidate suitable for real local development workflows.** |
-
-The total range is the sum of milestone estimates. Some design and test work will overlap; actual effort should be recorded and estimates revised as work is completed.
+| Milestone | Result |
+| --- | --- |
+| 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
+| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
+| 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
+| 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
+| 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
+| 5. Drift and environment snapshots | Compare declared environment with captured local state and explain meaningful changes. |
+| 6. Profiles and runtime adapter expansion | Multiple named profiles and a tested adapter boundary for additional local runtimes. |
+| 7. Packaging, compatibility, and release quality | Installable release, supported-platform matrix, polished docs, upgrade path, and release checks. |
+| 8. Hardening and usability validation | Fault injection, usability passes, performance checks, security review, and release candidate fixes. |
 
 ## Detailed work plan
 
-### 0. Repository and CLI contract — 12–18 hours
+### 0. Repository and CLI contract
 
 **Status:** Initial work is underway. Packaging, a profile schema, `init`, `inspect`, and `check` exist. The repository now has a README, architecture notes, an MIT license, and this roadmap. Remaining tasks include:
 
@@ -49,7 +46,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** A new contributor can create an environment, install the CLI, understand all current commands, run the documented quality checks, and tell which behaviors are implemented versus planned.
 
-### 1. Discovery and diagnostics — 18–26 hours
+### 1. Discovery and diagnostics
 
 - Replace ad hoc project discovery with a tested discovery result describing the selected root and evidence used.
 - Detect ambiguous nested roots and report how to select an explicit project directory.
@@ -65,7 +62,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** Diagnostics are deterministic, actionable, do not expose values, and correctly distinguish an unavailable tool from a malformed project or a failed runtime check.
 
-### 2. Docker Compose adapter and lifecycle — 26–36 hours
+### 2. Docker Compose adapter and lifecycle
 
 - Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
 - Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
@@ -81,7 +78,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** A sample project can be started, queried, and stopped repeatedly; DevDock reports ownership scope before actions and leaves unrelated resources untouched.
 
-### 3. Readiness and dependency orchestration — 20–28 hours
+### 3. Readiness and dependency orchestration
 
 - Model service dependencies from Compose definitions and explicit DevDock profile declarations.
 - Define readiness sources: Compose health status, TCP connection, HTTP response, and bounded custom checks that do not execute arbitrary untrusted commands by default.
@@ -96,7 +93,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** Startup behavior is predictable for dependency graphs and remains bounded and explainable when a service never becomes ready or the user interrupts the command.
 
-### 4. State, recovery, and safe cleanup — 24–34 hours
+### 4. State, recovery, and safe cleanup
 
 - Decide whether state is stored in a project-local `.devdock/` directory, a user-level directory, or both; document portability and privacy tradeoffs.
 - Define a versioned state format and atomic write strategy with corruption detection.
@@ -113,7 +110,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** Interrupted operations can be diagnosed and recovered without broad cleanup, accidental volume deletion, or claiming resources belonging to another tool.
 
-### 5. Drift and environment snapshots — 16–24 hours
+### 5. Drift and environment snapshots
 
 - Define which environment facts are safe and useful to snapshot: normalized profile fields, runtime versions, Compose service names, port mappings, and dependency identifiers.
 - Explicitly exclude environment values, credentials, container logs, bind-mounted file contents, and personal data.
@@ -127,7 +124,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** A user can compare a known snapshot with current declarations and understand exactly what changed without DevDock persisting secret or personal values.
 
-### 6. Profiles and runtime adapter expansion — 18–28 hours
+### 6. Profiles and runtime adapter expansion
 
 - Add multiple named profiles for legitimate local scenarios such as minimal services, full stack, and test dependencies.
 - Define profile inheritance/overrides carefully; reject ambiguous merge behavior and validate the final resolved profile.
@@ -142,7 +139,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** Profiles resolve consistently, and a second adapter can be added without changing the core command and state model or weakening safety guarantees.
 
-### 7. Packaging, compatibility, and release quality — 28–40 hours
+### 7. Packaging, compatibility, and release quality
 
 - Choose the supported operating systems and Python version window; test Windows, Linux, and macOS behavior explicitly.
 - Validate Windows process termination, paths, quoting, console signals, and Docker Desktop differences.
@@ -160,7 +157,7 @@ The total range is the sum of milestone estimates. Some design and test work wil
 
 **Acceptance:** A release candidate installs cleanly on each supported platform, exposes the documented commands, preserves user data during upgrade, and has reproducible CI evidence.
 
-### 8. Hardening and usability validation — 18–26 hours
+### 8. Hardening and usability validation
 
 - Conduct a threat review of profile parsing, path handling, subprocess invocation, output redaction, state writes, and cleanup scope.
 - Check for command injection, symlink/path traversal surprises, unsafe temporary files, and accidental secret logging.

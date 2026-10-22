@@ -13,6 +13,8 @@ The project is in its first working milestone. The current CLI can create a prof
 | `devdock check [DIRECTORY]` | Validates the profile and compares the running Python interpreter with its declared minimum; checks Docker Compose CLI, Compose file, and required environment variable names. | No. |
 | `devdock --help` | Shows available commands and options. | No. |
 
+See [`docs/cli.md`](docs/cli.md) for exact discovery, output, and exit-code behavior.
+
 `check` verifies that the Docker CLI and Compose plugin respond to `docker compose version`; it does not check whether the Docker daemon is running or start containers. Required environment variables must be set in the process environment. DevDock does not load `.env` files or print environment variable values.
 
 ## Requirements
@@ -149,7 +151,7 @@ DevDock is intended to use synthetic disposable projects for automated checks. T
 
 ## Project plans
 
-[`ROADMAP.md`](ROADMAP.md) lays out the engineering needed to reach a carefully validated release. The current estimate is approximately **180–260 engineering hours** across the planned milestones; estimates will change as implementation and platform testing expose more work.
+[`ROADMAP.md`](ROADMAP.md) lays out the engineering and acceptance criteria needed to reach a carefully validated release.
 
 ## License
 
