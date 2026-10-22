@@ -25,7 +25,7 @@ The profile is UTF-8 YAML loaded with safe parsing. The root must be an object w
 | --- | --- |
 | `schema_version` | Required integer `1`; any other version is rejected. |
 | `project` | Required, non-empty string; whitespace-only values are rejected. |
-| `runtimes` | Optional mapping of lowercase runtime names to non-empty requirement strings. Python checks use the interpreter running DevDock and print its executable and version. |
+| `runtimes` | Optional mapping of lowercase runtime names to non-empty requirement strings. Python checks use the interpreter running DevDock and print its executable and version. If that executable resolves to this project’s `.venv`, `venv`, or `env`, DevDock identifies it as the target interpreter too; DevDock never launches a project-controlled interpreter to probe its version. |
 | `compose_file` | Optional forward-slash, project-relative path. Absolute/drive-qualified paths, backslashes, and lexical `..` traversal are rejected. `check` verifies it exists and that resolved symlinks remain inside the project. |
 | `required_env` | Optional list of names accepted as Python identifiers. Each name must be set to a non-empty value in DevDock's inherited process environment. Unset and empty values get distinct findings, and values are never printed. |
 | `required_files` | Optional list of project-relative file paths. Absolute paths, drive prefixes, backslashes, NUL, and lexical `..` traversal are rejected. Resolved symlinks must remain inside the project. |
@@ -38,14 +38,14 @@ Unknown fields are errors. The schema does not load `.env`, expand variables, ex
 
 - `init` prints the created profile path to standard output and exits `0`. If the profile already exists, it writes an error to standard error and exits `1` without replacing the file.
 - `inspect` prints the selected root and discovered files to standard output. Invalid profile data is reported on standard error and exits `1`; otherwise it exits `0`.
-- `check` prints each finding to standard output as `[PASS]`, `[WARN]`, or `[FAIL]` followed by a stable code and summary, then optional evidence and a suggested action. Warnings do not fail the command. It exits `0` if there are no failed findings and `1` if the profile is missing/invalid or any check fails.
+- `check` prints each finding to standard output as `[PASS]`, `[WARN]`, `[SKIP]`, or `[FAIL]` followed by a stable code and summary, then optional evidence and a suggested action. Warnings and skipped checks do not fail the command. It exits `0` if there are no failed findings and `1` if the profile is missing/invalid or any check fails.
 - Typer handles command-line syntax and argument errors; those use its parser exit behavior.
 
 The output is intended for people. There is no machine-readable output format yet, so scripts should not depend on exact prose or formatting.
 
 ## Current check boundaries
 
-`check` is read-only. It checks the Python interpreter running DevDock when declared. Docker diagnostics separately check CLI/plugin response, daemon reachability, Compose file presence, and Compose config parsing. Compose files and required paths resolving outside the project fail before their contents are consumed. Compose's parser output is suppressed on failure because it can include interpolated values. Required paths are checked without reading file contents. Environment diagnostics report unset versus empty without displaying values. Port checks probe loopback availability and can become stale immediately. Checks do not start services, wait for service health, or prove that the project can run. See [`ROADMAP.md`](../ROADMAP.md) for remaining work.
+`check` is read-only. It checks the Python interpreter running DevDock when declared. When DevDock is already running from this project's `.venv`, `venv`, or `env`, it reports that same executable as the target interpreter; it never starts an arbitrary project interpreter. Otherwise, it reports the DevDock executable/version and warns that the target was not inspected. Docker diagnostics separately check CLI/plugin response, daemon reachability, Compose file presence, and Compose config parsing. Docker command output is suppressed; findings use only return status and safe summaries. Compose files and required paths resolving outside the project fail before their contents are consumed. Required paths are checked without reading file contents. Environment diagnostics report unset versus empty without displaying values. Port checks probe loopback availability and can become stale immediately. Checks do not start services, wait for service health, or prove that the project can run. See [`ROADMAP.md`](../ROADMAP.md) for later lifecycle work.
 
 ## Diagnostic codes
 
@@ -58,6 +58,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
+| Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
 
 Codes are illustrative and not exhaustive; the `code` field in source is authoritative. Existing codes should not be repurposed for different failure meanings.
 

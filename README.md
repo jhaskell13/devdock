@@ -10,7 +10,7 @@ The repository foundation milestone is complete. The current CLI can create a pr
 | --- | --- | --- |
 | `devdock init [DIRECTORY]` | Creates a starter `devdock.yaml`. The directory defaults to the current directory. | Creates one profile file. |
 | `devdock inspect [DIRECTORY]` | Finds the nearest project profile or common Compose file, reports the marker used, nested roots, and known project files. | No. |
-| `devdock check [DIRECTORY]` | Validates the profile and checks declared Python, Docker/Compose, paths, ports, and environment requirements. | No. |
+| `devdock check [DIRECTORY]` | Validates the profile and checks declared Python, Docker/Compose, paths, ports, and environment requirements. Reports warnings and prerequisite-dependent checks it could not run. | No. |
 | `devdock --help` | Shows available commands and options. | No. |
 
 See [`docs/cli.md`](docs/cli.md) for exact discovery, output, and exit-code behavior.
@@ -122,11 +122,11 @@ Do not commit real credentials, `.env` files, customer data, or other sensitive 
 
 ## Results and exit codes
 
-- Exit code `0`: the profile is valid and no check failed. Warnings may be present when DevDock cannot verify the target project's interpreter.
+- Exit code `0`: the profile is valid and no check failed. Warnings or skipped dependent checks may be reported when DevDock cannot verify a target interpreter or prerequisite.
 - Exit code `1`: the profile is missing or invalid, or at least one check failed. Findings include a suggested action when DevDock can provide one.
 - CLI usage errors use Typer's argument parsing exit behavior.
 
-The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Docker daemon health beyond a basic `docker info` request, service readiness, networking, volumes, and teardown remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).
+The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Output from Docker commands is suppressed except for executable paths and exit status. Docker daemon health beyond a basic `docker info` request, service readiness, networking, volumes, and teardown remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).
 
 ## Troubleshooting
 

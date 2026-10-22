@@ -8,6 +8,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 - Structured discovery evidence, nested-root reporting, and safe project manifest/Python metadata inspection.
 - Coded diagnostics for Python interpreter evidence, Docker/Compose availability and parsing, required paths, environment state, and TCP ports.
+- Explicit skipped-check findings when Docker prerequisites or safe Compose inputs are unavailable; Docker command output is not exposed.
 - `devdock init`, `devdock inspect`, and `devdock check` for local project profiles.
 - Version 1 YAML profile validation and read-only checks for declared Python, Docker Compose, Compose file, and environment-name requirements.
 - CLI behavior, architecture, installation, contribution, and security documentation.

@@ -20,7 +20,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 | Milestone | Result |
 | --- | --- |
 | 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
-| 1. Discovery and diagnostics (in progress) | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
+| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
 | 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
 | 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
 | 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
@@ -39,21 +39,21 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 1. Discovery and diagnostics
 
-**Status:** In progress. Implemented so far: a discovery result with marker evidence, nearest-root selection, nested-root reporting, and filename-only manifest inventory; bounded Python version metadata reads; structured finding fields and stable codes; Python executable/version evidence and a warning when the DevDock interpreter is not the project's `.venv`; separate Docker CLI, daemon, and Compose parser checks; required-file/directory checks with resolved symlink containment; distinct unset/empty environment findings; and loopback port probes. The remaining bullets below are planned work and the acceptance criteria have not yet been met.
+**Status:** Complete. Project-root evidence and inventory, bounded Python metadata inspection, structured findings, runtime and Compose diagnostics, safe path checks, environment redaction, and port checks are implemented. Dependent checks report `SKIP` when a prerequisite is unavailable. Target Python is identified only when DevDock is already running from a conventional project virtual environment; DevDock never executes an arbitrary project interpreter to inspect it. Other manifests are inventoried by name until a diagnostic needs a specific safe metadata field.
 
 - [x] Replace ad hoc project discovery with a tested discovery result describing the selected root and evidence used.
 - [x] Detect nested marked roots and report that the nearest one wins plus how to select another project directory.
 - [x] Read bounded Python version declarations from `pyproject.toml`, `.python-version`, and `.tool-versions`; inventory other common manifests and lockfiles by filename only. Continue adding safe metadata readers only for fields needed by diagnostics.
-- [ ] Distinguish the DevDock interpreter from the target project's configured interpreter and report both executable/version pairs when available.
+- [x] Distinguish the DevDock interpreter from the target project's active conventional virtual environment and report both executable/version pairs when available. Report candidate paths and a warning when the project interpreter is not active; do not execute arbitrary project binaries.
 - [x] Check Docker CLI, Compose plugin, daemon reachability, and Compose file parsing as separate findings.
 - [x] Validate profile-configured ports, port collisions on loopback, required files, and expected directories.
 - [x] Make environment-variable diagnostics redact values and distinguish unset from empty.
 - [x] Introduce a finding model with code, severity, summary, evidence, remediation, and documentation reference.
-- Add failure categories and consistent exit-code rules, including warnings and partial checks.
-- Add synthetic fixture projects for valid, missing, malformed, nested, ambiguous, unsupported, and platform-specific cases.
-- Test command output with paths containing spaces, Unicode, and Windows path separators.
+- [x] Add categorized finding codes and consistent exit-code rules, including warnings and skipped dependent checks.
+- [x] Add synthetic fixture projects for valid, missing, malformed, nested, ambiguous, unsupported, and platform-specific cases.
+- [x] Test command output with paths containing spaces, Unicode, and Windows path separators.
 
-**Acceptance:** Diagnostics are deterministic, actionable, do not expose values, and correctly distinguish an unavailable tool from a malformed project or a failed runtime check.
+**Acceptance:** Met. Findings are actionable and categorized, sensitive environment values and captured Docker output are suppressed, path checks are bounded to the project, and tests distinguish unavailable tools, malformed Compose configuration, missing files, and runtime failures. Docker behavior is mocked in the standard suite; no live daemon is required.
 
 ### 2. Docker Compose adapter and lifecycle
 
