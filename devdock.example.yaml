@@ -1,0 +1,8 @@
+schema_version: 1
+project: example-project
+runtimes:
+  python: ">=3.12"
+  docker: "compose"
+compose_file: compose.yaml
+required_env: []
+
