@@ -776,3 +776,32 @@ def test_other_preflight_failures_still_block_a_start(tmp_path: Path) -> None:
     )
 
     assert result.code == "UP_PREFLIGHT_FAILED" and adapter.starts == []
+
+
+# --- socket permission problems --------------------------------------------
+
+DENIED = ComposeCapabilities(
+    executable="docker",
+    compose_cli="available",
+    compose_cli_returncode=0,
+    daemon="permission_denied",
+)
+
+
+def test_up_refuses_with_a_permission_code_and_runs_nothing(tmp_path: Path) -> None:
+    adapter = FakeAdapter(capabilities=DENIED)
+
+    result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
+
+    assert result.code == "UP_PERMISSION_DENIED" and adapter.starts == []
+    assert "docker" in (result.remedy or "").lower()
+
+
+def test_status_and_down_use_the_same_permission_code_family(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+
+    status = project_status(profile(), root, adapter=StatusAdapter(capabilities=DENIED))
+    plan = plan_stop(profile(), root, adapter=StopAdapter(capabilities=DENIED))
+
+    assert status.code == "STATUS_PERMISSION_DENIED"
+    assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_PERMISSION_DENIED"

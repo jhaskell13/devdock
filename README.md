@@ -143,6 +143,10 @@ Do not commit real credentials, `.env` files, customer data, or other sensitive 
 
 Activate the virtual environment where you installed DevDock. If it is not installed yet, run `python -m pip install -e ".[dev]"` from the repository root.
 
+**`DOCKER_DAEMON_PERMISSION_DENIED`, or every Docker test skips with a permission message**
+
+The Docker CLI works but your user may not open the daemon socket. On Linux or WSL, add yourself to the `docker` group, then start a new login session; group changes do not apply to shells that are already open. On WSL, run `wsl --shutdown` from Windows and reopen the terminal. If Docker Desktop is in use, confirm WSL integration is enabled for this distribution. `id` should then list `docker` among your groups.
+
 **`devdock check` cannot find a profile**
 
 Run `devdock init` in the intended project directory, or pass the directory containing the profile to `devdock check`.

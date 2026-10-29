@@ -33,6 +33,13 @@ FailureKind = Literal[
     "unknown",
 ]
 
+PERMISSION_DENIED_REMEDY = (
+    "Your user cannot open the Docker socket. On Linux or WSL, add yourself to the 'docker' "
+    "group and then start a new login session (on WSL: run 'wsl --shutdown' from Windows and "
+    "reopen the terminal); on Docker Desktop, confirm WSL integration is enabled for this "
+    "distribution. Then retry."
+)
+
 # Checked in order; the first kind with a matching marker wins. More specific
 # kinds come before the general ones they would otherwise be mistaken for.
 _MARKERS: tuple[tuple[FailureKind, tuple[str, ...]], ...] = (
@@ -42,6 +49,7 @@ _MARKERS: tuple[tuple[FailureKind, tuple[str, ...]], ...] = (
             "permission denied while trying to connect",
             "dial unix /var/run/docker.sock: connect: permission denied",
             "got permission denied",
+            "access is denied",
         ),
     ),
     (
@@ -194,8 +202,7 @@ _SUMMARY: dict[FailureKind, str] = {
 }
 
 _REMEDY: dict[FailureKind, str] = {
-    "permission_denied": "Add your user to the 'docker' group, use rootless Docker, or start "
-    "Docker Desktop, then retry.",
+    "permission_denied": PERMISSION_DENIED_REMEDY,
     "daemon_unavailable": "Start Docker Desktop or the Docker Engine service, confirm with "
     "'devdock check', then retry.",
     "config_invalid": "Run 'docker compose config' in the project to see the validation error, "

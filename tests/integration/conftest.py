@@ -9,35 +9,32 @@ including the volumes DevDock itself deliberately preserves.
 from __future__ import annotations
 
 import shutil
-import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from helpers import compose_teardown, docker
 
+from devdock.adapters import ComposeAdapter
 from devdock.config import load_profile
 from devdock.discovery import CONFIG_NAME
+from devdock.failures import PERMISSION_DENIED_REMEDY
 from devdock.ownership import OwnershipScope, ownership_scope
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "demo"
 
 
-def _daemon_reachable() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    try:
-        return docker("info", "--format", "{{.ServerVersion}}").returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
 @pytest.fixture(scope="session")
 def docker_daemon() -> None:
-    """Skip the whole suite when no daemon is available rather than failing."""
+    """Skip the whole suite, with the reason, unless DevDock itself can reach the daemon."""
 
-    if not _daemon_reachable():
-        pytest.skip("No reachable Docker daemon; run with Docker to exercise this suite.")
+    capabilities = ComposeAdapter().detect_capabilities()
+    if not capabilities.compose_available:
+        pytest.skip("Docker Compose CLI is not available; run with Docker to exercise this suite.")
+    if capabilities.daemon == "permission_denied":
+        pytest.skip(f"This user may not connect to the Docker daemon. {PERMISSION_DENIED_REMEDY}")
+    if not capabilities.daemon_available:
+        pytest.skip("No reachable Docker daemon; start Docker and rerun with -m docker.")
 
 
 def _scope_for(root: Path) -> OwnershipScope:

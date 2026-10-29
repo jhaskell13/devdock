@@ -16,6 +16,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- DevDock reported `DOCKER_DAEMON_AVAILABLE` when the daemon socket could not be opened. The probe relied on the exit status of `docker info`, which is zero even when the server is unreachable, so `check` passed, `up` proceeded to refuse with an ownership conflict, and the Docker test suite ran instead of skipping. Reachability now requires a server version from `docker version`, and a socket the user may not open is reported as `DOCKER_DAEMON_PERMISSION_DENIED` with the group and re-login remedy. The suite and the demo use the same detection.
 - `devdock up` refused to run a second time when the profile declared a port its own services publish. Port probes are now advisory during the start preflight; Compose's own bind remains authoritative and reports `UP_PORT_CONFLICT`.
 - Redaction could stall on long runtime output. The URL-credential pattern had an unbounded scheme run and backtracked quadratically; 256 KB of plain text took over a minute. All patterns are now bounded and a regression test asserts linear behavior.
 - Hardening from the Milestone 2 review: Compose runs with `COMPOSE_REMOVE_ORPHANS` pinned off so a project `.env` cannot widen `down`; `down` re-verifies the plan immediately before acting and reports `DOWN_PARTIAL` when it cannot confirm the result; inventory fields are JSON-encoded so labels cannot forge records; profile paths reject control characters; redaction skips well-known non-secret variables and cannot mangle its own placeholders.

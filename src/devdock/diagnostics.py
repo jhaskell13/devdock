@@ -13,6 +13,7 @@ from typing import Literal
 
 from devdock.adapters import ComposeAdapter, RuntimeAdapter
 from devdock.config import ProjectProfile
+from devdock.failures import PERMISSION_DENIED_REMEDY
 from devdock.metadata import read_python_metadata
 from devdock.ownership import compose_path_for, resolves_inside
 
@@ -220,6 +221,15 @@ def _check_compose(
                 "PASS",
                 "Docker daemon is reachable.",
                 evidence=("Docker info request succeeded.",),
+            )
+        )
+    elif capabilities.daemon == "permission_denied":
+        findings.append(
+            _finding(
+                "DOCKER_DAEMON_PERMISSION_DENIED",
+                "FAIL",
+                "Docker CLI is available, but this user may not connect to the daemon.",
+                remedy=PERMISSION_DENIED_REMEDY,
             )
         )
     else:

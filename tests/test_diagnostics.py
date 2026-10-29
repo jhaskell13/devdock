@@ -403,3 +403,58 @@ def test_compose_parser_is_checked_even_when_daemon_is_unavailable(
 
     assert "DOCKER_DAEMON_UNAVAILABLE" in codes
     assert "COMPOSE_CONFIG_VALID" in codes
+
+
+def test_socket_permission_problems_get_their_own_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    profile = ProjectProfile(
+        schema_version=1,
+        project="sample",
+        runtimes={"docker": "compose"},
+        compose_file=Path("compose.yaml"),
+    )
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="v2", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="permission denied while trying to connect to the Docker daemon socket",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+    )
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.subprocess, "run", lambda *_a, **_k: next(responses))
+
+    findings = check_profile(profile, tmp_path)
+    by_code = {item.code: item for item in findings}
+
+    assert by_code["DOCKER_DAEMON_PERMISSION_DENIED"].severity == "FAIL"
+    assert "DOCKER_DAEMON_AVAILABLE" not in by_code
+    assert "DOCKER_DAEMON_UNAVAILABLE" not in by_code
+    assert "docker" in (by_code["DOCKER_DAEMON_PERMISSION_DENIED"].remedy or "").lower()
+    assert "wsl --shutdown" in (by_code["DOCKER_DAEMON_PERMISSION_DENIED"].remedy or "")
+
+
+def test_daemon_probe_with_empty_success_is_reported_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `docker info` exits 0 with an unreachable socket."""
+
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"docker": "compose"})
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="v2", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr="some client-side error"),
+        ]
+    )
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.subprocess, "run", lambda *_a, **_k: next(responses))
+
+    codes = {item.code for item in check_profile(profile, tmp_path)}
+
+    assert "DOCKER_DAEMON_UNAVAILABLE" in codes
+    assert "DOCKER_DAEMON_AVAILABLE" not in codes

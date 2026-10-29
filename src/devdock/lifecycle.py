@@ -17,7 +17,7 @@ from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, Run
 from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
 from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
-from devdock.failures import FailureExplanation, classify_failure
+from devdock.failures import PERMISSION_DENIED_REMEDY, FailureExplanation, classify_failure
 from devdock.ownership import (
     OwnershipAssessment,
     OwnershipScope,
@@ -114,6 +114,13 @@ def start_project(
             "Refusing to start: the Docker Compose CLI is not available.",
             (),
             "Install Docker with the Compose plugin, then retry.",
+        )
+    if capabilities.daemon == "permission_denied":
+        return _refusal(
+            "UP_PERMISSION_DENIED",
+            "Refusing to start: this user may not connect to the Docker daemon.",
+            (),
+            PERMISSION_DENIED_REMEDY,
         )
     if not capabilities.daemon_available:
         return _refusal(
@@ -265,6 +272,13 @@ def project_status(
             (),
             "Install Docker with the Compose plugin, then retry.",
         )
+    if capabilities.daemon == "permission_denied":
+        return _refusal(
+            "STATUS_PERMISSION_DENIED",
+            "Cannot report status: this user may not connect to the Docker daemon.",
+            (),
+            PERMISSION_DENIED_REMEDY,
+        )
     if not capabilities.daemon_available:
         return _refusal(
             "STATUS_DAEMON_UNAVAILABLE",
@@ -402,6 +416,13 @@ def plan_stop(
             "Refusing to stop: the Docker Compose CLI is not available.",
             (),
             "Install Docker with the Compose plugin, then retry.",
+        )
+    if capabilities.daemon == "permission_denied":
+        return _refusal(
+            "DOWN_PERMISSION_DENIED",
+            "Refusing to stop: this user may not connect to the Docker daemon.",
+            (),
+            PERMISSION_DENIED_REMEDY,
         )
     if not capabilities.daemon_available:
         return _refusal(

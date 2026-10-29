@@ -48,7 +48,7 @@ class CommandRunner(Protocol):
 
 
 ComposeCliState = Literal["missing", "unresponsive", "failed", "available"]
-DaemonState = Literal["not_checked", "unavailable", "available"]
+DaemonState = Literal["not_checked", "unavailable", "permission_denied", "available"]
 ConfigOutcome = Literal["valid", "invalid", "unavailable"]
 
 

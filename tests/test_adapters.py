@@ -42,6 +42,9 @@ class RecordingRunner:
 
 
 OK = CommandResult(0, "", "")
+# A daemon probe that actually answered. The probe requires a server version on
+# stdout, so an empty success is deliberately *not* treated as reachable.
+DAEMON_UP = CommandResult(0, "27.3.1\n", "")
 
 
 def test_missing_docker_cli_short_circuits_without_running_commands() -> None:
@@ -80,7 +83,7 @@ def test_unresponsive_compose_plugin_is_distinguished_from_failed(
 
 
 def test_capabilities_use_argument_arrays_and_bounded_timeouts() -> None:
-    runner = RecordingRunner([OK, OK])
+    runner = RecordingRunner([OK, DAEMON_UP])
     adapter = ComposeAdapter(runner, locate=lambda _: "docker")
 
     capabilities = adapter.detect_capabilities()
@@ -88,7 +91,7 @@ def test_capabilities_use_argument_arrays_and_bounded_timeouts() -> None:
     assert capabilities.compose_available and capabilities.daemon_available
     assert [call[0] for call in runner.calls] == [
         ["docker", "compose", "version"],
-        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        ["docker", "version", "--format", "{{.Server.Version}}"],
     ]
     assert all(call[2] > 0 for call in runner.calls)
 
@@ -137,7 +140,7 @@ def test_check_profile_accepts_an_injected_adapter(tmp_path: Path) -> None:
         runtimes={"docker": "compose"},
         compose_file=Path("compose.yaml"),
     )
-    runner = RecordingRunner([OK, OK, OK])
+    runner = RecordingRunner([OK, DAEMON_UP, OK])
     adapter = ComposeAdapter(runner, locate=lambda _: "docker")
 
     findings = check_profile(profile, tmp_path, adapter=adapter)
@@ -653,3 +656,54 @@ def test_container_template_json_encodes_every_field() -> None:
     for template in (_CONTAINER_FORMAT, _NETWORK_FORMAT, _VOLUME_FORMAT):
         fields = template.split("\t")
         assert all(field.startswith("{{json (") and field.endswith(")}}") for field in fields)
+
+
+# --- daemon probe ------------------------------------------------------------
+
+
+def test_daemon_probe_does_not_trust_a_zero_exit_with_no_server_version() -> None:
+    """`docker info` exits 0 with an unreachable socket; the probe must not be fooled.
+
+    This is the false positive that made DevDock report DOCKER_DAEMON_AVAILABLE
+    on a machine whose user could not open the socket at all.
+    """
+
+    runner = RecordingRunner([OK, CommandResult(0, "", "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    capabilities = adapter.detect_capabilities()
+
+    assert capabilities.compose_available
+    assert capabilities.daemon == "unavailable"
+    assert not capabilities.daemon_available
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "permission denied while trying to connect to the Docker daemon socket at "
+        "unix:///var/run/docker.sock: dial unix /var/run/docker.sock: connect: permission denied",
+        "error during connect: open //./pipe/docker_engine: Access is denied.",
+    ],
+)
+def test_daemon_probe_distinguishes_permission_problems(stderr: str) -> None:
+    runner = RecordingRunner([OK, CommandResult(1, "", stderr)])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    capabilities = adapter.detect_capabilities()
+
+    assert capabilities.daemon == "permission_denied"
+    assert not capabilities.daemon_available
+    assert "docker.sock" not in repr(capabilities)  # classified, never quoted
+
+
+def test_daemon_probe_reports_a_stopped_daemon_as_unavailable() -> None:
+    stopped = CommandResult(
+        1,
+        "",
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?",
+    )
+    adapter = ComposeAdapter(RecordingRunner([OK, stopped]), locate=lambda _: "docker")
+
+    assert adapter.detect_capabilities().daemon == "unavailable"

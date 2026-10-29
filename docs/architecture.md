@@ -47,7 +47,7 @@ Ownership (ownership.py)
 Diagnostics
   ├─ structured findings with stable code, severity, evidence, and remediation
   ├─ declared Python minimum and exact DevDock interpreter
-  ├─ Docker CLI/plugin, daemon, and Compose parsing as separate checks
+  ├─ Docker CLI/plugin, daemon (via `docker version`, never `docker info`), and Compose parsing
   ├─ configured and required project paths with symlink containment
   ├─ required environment names without exposing values
   └─ loopback TCP port availability probes

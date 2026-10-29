@@ -25,6 +25,11 @@ import time
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPOSITORY / "src"))
+
+from devdock.adapters import ComposeAdapter  # noqa: E402
+from devdock.failures import PERMISSION_DENIED_REMEDY  # noqa: E402
+
 EXAMPLE = REPOSITORY / "examples" / "demo"
 INTRUDER_SUFFIX = "-intruder-1"
 
@@ -52,7 +57,10 @@ def devdock(*args: str, expect: int | None = 0) -> subprocess.CompletedProcess[s
         if stream.strip():
             print(stream.rstrip())
     if expect is not None and result.returncode != expect:
-        raise Stop(f"'{printed}' exited {result.returncode}, expected {expect}")
+        raise Stop(
+            f"'{printed}' exited {result.returncode}, expected {expect}. "
+            "The output above is DevDock's own explanation; nothing after this step ran."
+        )
     return result
 
 
@@ -61,10 +69,21 @@ def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 
 
 def require_docker() -> None:
+    """Use DevDock's own capability detection so the demo and the tool agree."""
+
     if shutil.which("docker") is None:
         raise Stop("Docker is not on PATH. This demo needs a working Docker installation.")
-    if docker("info", "--format", "{{.ServerVersion}}", check=False).returncode != 0:
+    capabilities = ComposeAdapter().detect_capabilities()
+    if not capabilities.compose_available:
+        raise Stop("The Docker Compose plugin did not respond. Install or enable it, then retry.")
+    if capabilities.daemon == "permission_denied":
+        raise Stop(f"This user may not connect to the Docker daemon.\n{PERMISSION_DENIED_REMEDY}")
+    if not capabilities.daemon_available:
         raise Stop("The Docker daemon is not responding. Start Docker Desktop or the service.")
+    print(
+        f"Docker is reachable ({capabilities.executable}); the demo will create disposable "
+        "containers, one network, and one volume, and remove them at the end."
+    )
 
 
 def project_name(root: Path) -> str:

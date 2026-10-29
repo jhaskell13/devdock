@@ -35,7 +35,7 @@ The profile is UTF-8 YAML loaded with safe parsing. The root must be an object w
 | `required_dirs` | Optional list of project-relative directory paths with the same containment rules as `required_files`. |
 | `ports` | Optional distinct integer TCP ports from `1` through `65535`. Each is probed by binding `127.0.0.1`; this is a momentary check, not a reservation. |
 
-Unknown fields are errors. The schema does not load `.env`, expand variables, execute commands, or store state. Python requirements currently accept a minimum such as `>=3.12` or `>=3.12.1`; the check compares major, minor, and patch versions with the interpreter running DevDock. Docker accepts `compose` and separately checks the CLI/plugin, daemon reachability, and Compose config parser. Other runtime names or requirement forms produce a failed finding.
+Unknown fields are errors. The schema does not load `.env`, expand variables, execute commands, or store state. Python requirements currently accept a minimum such as `>=3.12` or `>=3.12.1`; the check compares major, minor, and patch versions with the interpreter running DevDock. Docker accepts `compose` and separately checks the CLI/plugin, daemon reachability, and Compose config parser. Reachability is probed with `docker version --format '{{.Server.Version}}'`, which fails when the server does not answer; `docker info` is not used because it exits successfully even when the daemon socket is unreachable. Other runtime names or requirement forms produce a failed finding.
 
 ## Output and exit behavior
 
@@ -76,7 +76,7 @@ When a start or stop fails, DevDock reads the runtime's message to recognize *wh
 
 | Kind | Codes | Typical cause |
 | --- | --- | --- |
-| Permission | `UP_PERMISSION_DENIED`, `DOWN_PERMISSION_DENIED` | The user cannot reach the Docker socket. |
+| Permission | `UP_PERMISSION_DENIED`, `STATUS_PERMISSION_DENIED`, `DOWN_PERMISSION_DENIED` | The user cannot open the Docker socket. Reported before any action as well as from runtime output. |
 | Daemon | `UP_DAEMON_UNAVAILABLE`, `DOWN_DAEMON_UNAVAILABLE` | The daemon stopped responding mid-operation. |
 | Configuration | `UP_CONFIG_INVALID` | Compose rejected the file during the run. |
 | Registry auth | `UP_REGISTRY_AUTH_REQUIRED` | The registry needs `docker login`. |
@@ -173,7 +173,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Code family | Examples | Meaning |
 | --- | --- | --- |
 | Profile/runtime | `PROFILE_VALID`, `PYTHON_VERSION_OK`, `PYTHON_VERSION_TOO_OLD`, `RUNTIME_UNSUPPORTED` | Profile validity and declared runtime support. Python evidence identifies the exact DevDock interpreter. |
-| Docker/Compose | `DOCKER_CLI_MISSING`, `COMPOSE_CLI_UNAVAILABLE`, `DOCKER_DAEMON_UNAVAILABLE`, `COMPOSE_CONFIG_INVALID` | Separate CLI/plugin, daemon, and config parser outcomes. Parser output is suppressed to protect interpolated values. |
+| Docker/Compose | `DOCKER_CLI_MISSING`, `COMPOSE_CLI_UNAVAILABLE`, `DOCKER_DAEMON_UNAVAILABLE`, `DOCKER_DAEMON_PERMISSION_DENIED`, `COMPOSE_CONFIG_INVALID` | Separate CLI/plugin, daemon, and config parser outcomes. A daemon counts as reachable only when `docker version` returns a server version; a socket the user may not open is reported distinctly. Parser output is suppressed to protect interpolated values. |
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |

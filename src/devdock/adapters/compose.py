@@ -144,17 +144,20 @@ class ComposeAdapter:
                 compose_cli_returncode=version.returncode,
             )
 
+        # `docker info` exits 0 even when the daemon socket is unreachable, so it
+        # cannot be used as a reachability probe. `docker version` exits non-zero
+        # and prints nothing to stdout unless the server answered; require both.
         daemon_state: DaemonState
         try:
             daemon = self._runner(
-                [executable, "info", "--format", "{{.ServerVersion}}"],
+                [executable, "version", "--format", "{{.Server.Version}}"],
                 timeout=DAEMON_TIMEOUT,
                 env=self._environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             daemon_state = "unavailable"
         else:
-            daemon_state = "unavailable" if daemon.returncode else "available"
+            daemon_state = _daemon_state(daemon)
         return ComposeCapabilities(
             executable=executable,
             compose_cli="available",
@@ -479,6 +482,20 @@ def _parse_publisher(raw: object) -> PublishedPort | None:
         container_port=target,
         protocol=protocol if isinstance(protocol, str) and protocol else "tcp",
     )
+
+
+_PERMISSION_MARKERS = ("permission denied", "access is denied")
+
+
+def _daemon_state(result: CommandResult) -> DaemonState:
+    """Interpret the version probe; the captured text is only classified, never shown."""
+
+    if result.returncode == 0 and result.stdout.strip():
+        return "available"
+    lowered = result.stderr.lower()
+    if any(marker in lowered for marker in _PERMISSION_MARKERS):
+        return "permission_denied"
+    return "unavailable"
 
 
 def _decode_fields(line: str, expected: int) -> list[str] | str:
