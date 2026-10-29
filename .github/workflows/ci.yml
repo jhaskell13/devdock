@@ -41,8 +41,11 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
-      - name: Check formatting and lint
+      - name: Lint
         run: python -m ruff check src tests
+
+      - name: Check formatting
+        run: python -m ruff format --check src tests
 
       - name: Check types
         run: python -m mypy src/devdock
@@ -51,5 +54,7 @@ jobs:
         run: python -m build
 
       - name: Smoke-test installed CLI
-        run: devdock --help
+        run: |
+          devdock --version
+          devdock --help
 

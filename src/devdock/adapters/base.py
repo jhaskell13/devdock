@@ -238,9 +238,7 @@ class RuntimeAdapter(Protocol):
         """Stop and remove the project's containers and networks; never volumes or images."""
         ...
 
-    def list_declared_services(
-        self, *, project_root: Path, compose_file: Path
-    ) -> DeclaredServices:
+    def list_declared_services(self, *, project_root: Path, compose_file: Path) -> DeclaredServices:
         """Return service names from the configuration without rendering its values."""
         ...
 

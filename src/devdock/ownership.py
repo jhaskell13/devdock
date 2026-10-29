@@ -104,8 +104,8 @@ class OwnershipScope:
     def describe(self) -> tuple[str, ...]:
         """Human-readable lines printed before any lifecycle action."""
 
-        compose = "none configured or discovered" if self.compose_file is None else str(
-            self.compose_file
+        compose = (
+            "none configured or discovered" if self.compose_file is None else str(self.compose_file)
         )
         return (
             f"Compose project name: {self.project_name}",
@@ -158,9 +158,7 @@ def classify_container(record: ContainerRecord, scope: OwnershipScope) -> Confli
     reasons: list[str] = []
     if not record.service:
         reasons.append(f"Missing {SERVICE_LABEL} label.")
-    if _normalize_path_text(record.working_dir) != _normalize_path_text(
-        scope.expected_working_dir
-    ):
+    if _normalize_path_text(record.working_dir) != _normalize_path_text(scope.expected_working_dir):
         reasons.append(
             f"Working directory label is {record.working_dir or '(empty)'}; "
             f"expected {scope.expected_working_dir}."
@@ -204,9 +202,7 @@ class OwnershipAssessment:
         lines = list(self.scope.describe())
         if self.managed:
             lines.append(f"Managed containers ({len(self.managed)}):")
-            lines.extend(
-                f"  {item.name} [{item.service}] {item.state}" for item in self.managed
-            )
+            lines.extend(f"  {item.name} [{item.service}] {item.state}" for item in self.managed)
         else:
             lines.append("Managed containers: none")
         if self.networks:
@@ -237,9 +233,7 @@ class OwnershipAssessment:
                 "the configuration that created them, then retry."
             )
         elif self.errors:
-            lines.append(
-                "Refusing to act: DevDock could not confirm which resources it owns."
-            )
+            lines.append("Refusing to act: DevDock could not confirm which resources it owns.")
         return tuple(lines)
 
 

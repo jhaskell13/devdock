@@ -72,9 +72,7 @@ def test_missing_compose_file_is_reported(tmp_path: Path) -> None:
 
 
 def test_findings_have_stable_codes_and_interpreter_evidence(tmp_path: Path) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", runtimes={"python": ">=3.12"}
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12"})
 
     findings = check_profile(profile, tmp_path)
 
@@ -97,15 +95,11 @@ def test_python_minimum_patch_version_is_compared(
     )
 
     patch_required = check_profile(
-        ProjectProfile(
-            schema_version=1, project="sample", runtimes={"python": ">=3.12.1"}
-        ),
+        ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12.1"}),
         tmp_path,
     )
     minor_required = check_profile(
-        ProjectProfile(
-            schema_version=1, project="sample", runtimes={"python": ">=3.12"}
-        ),
+        ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12"}),
         tmp_path,
     )
 
@@ -120,13 +114,9 @@ def test_project_interpreter_is_distinguished_from_devdock_interpreter(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
 
-    findings = check_profile(
-        ProjectProfile(schema_version=1, project="sample"), tmp_path
-    )
+    findings = check_profile(ProjectProfile(schema_version=1, project="sample"), tmp_path)
 
-    project_finding = next(
-        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
-    )
+    project_finding = next(item for item in findings if item.code == "PROJECT_PYTHON_METADATA")
     assert project_finding.severity == "WARN"
     assert any("target not inspected" in item for item in project_finding.evidence)
 
@@ -137,9 +127,7 @@ def test_active_project_virtual_environment_reports_both_interpreter_pairs(
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
-    executable = tmp_path / ".venv" / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    )
+    executable = tmp_path / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     monkeypatch.setattr(
         diagnostics,
         "sys",
@@ -151,9 +139,7 @@ def test_active_project_virtual_environment_reports_both_interpreter_pairs(
 
     findings = check_profile(ProjectProfile(schema_version=1, project="sample"), tmp_path)
 
-    project_finding = next(
-        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
-    )
+    project_finding = next(item for item in findings if item.code == "PROJECT_PYTHON_METADATA")
     assert project_finding.severity == "PASS"
     assert any(item.startswith("DevDock executable:") for item in project_finding.evidence)
     assert any(item.startswith("Target project executable:") for item in project_finding.evidence)
@@ -212,9 +198,7 @@ def test_rejects_resolved_paths_outside_project_without_platform_symlink_support
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outside = tmp_path.parent / "outside-project"
-    profile = ProjectProfile(
-        schema_version=1, project="sample", required_dirs=[Path("escape")]
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", required_dirs=[Path("escape")])
     original_resolve = Path.resolve
 
     def resolve_escape(path: Path, *args: object, **kwargs: object) -> Path:
@@ -232,9 +216,7 @@ def test_rejects_resolved_paths_outside_project_without_platform_symlink_support
 def test_unresolvable_required_paths_are_reported_without_crashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", required_files=[Path("loop")]
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", required_files=[Path("loop")])
     original_resolve = Path.resolve
 
     def fail_loop(path: Path, *args: object, **kwargs: object) -> Path:
@@ -384,14 +366,10 @@ def test_compose_reports_missing_cli_or_plugin(
     compose_result: SimpleNamespace | None,
     expected_code: str,
 ) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", runtimes={"docker": "compose"}
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"docker": "compose"})
     monkeypatch.setattr(compose.shutil, "which", lambda _: docker_path)
     if compose_result is not None:
-        monkeypatch.setattr(
-            compose.subprocess, "run", lambda *_args, **_kwargs: compose_result
-        )
+        monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: compose_result)
 
     findings = check_profile(profile, tmp_path)
 
@@ -425,4 +403,3 @@ def test_compose_parser_is_checked_even_when_daemon_is_unavailable(
 
     assert "DOCKER_DAEMON_UNAVAILABLE" in codes
     assert "COMPOSE_CONFIG_VALID" in codes
-

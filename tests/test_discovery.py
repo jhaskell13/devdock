@@ -67,4 +67,3 @@ def test_discovery_handles_unicode_and_spaces_in_project_paths(tmp_path: Path) -
 
     assert result.root == root.resolve()
     assert result.matched_markers == ("compose.yaml",)
-

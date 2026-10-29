@@ -63,10 +63,7 @@ def _project_python_interpreters(root: Path) -> tuple[Path, ...]:
     """Return conventional local virtual-environment interpreter paths."""
 
     names = (".venv", "venv", "env")
-    candidates = [
-        root / environment / "Scripts" / "python.exe"
-        for environment in names
-    ]
+    candidates = [root / environment / "Scripts" / "python.exe" for environment in names]
     candidates.extend(root / environment / "bin" / "python" for environment in names)
     return tuple(Path(os.path.abspath(path)) for path in candidates)
 
@@ -294,15 +291,11 @@ def check_profile(
 
     project_python = read_python_metadata(root)
     if project_python.declarations:
-        declarations = tuple(
-            f"{item.source}: {item.value}" for item in project_python.declarations
-        )
+        declarations = tuple(f"{item.source}: {item.value}" for item in project_python.declarations)
         current_executable = Path(os.path.abspath(sys.executable))
         candidates = _project_python_interpreters(root)
         selected = current_executable in candidates
-        version_text = (
-            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        )
+        version_text = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         interpreter_evidence: tuple[str, ...]
         if selected:
             interpreter_evidence = (
@@ -329,7 +322,8 @@ def check_profile(
                     if selected
                     else "the target project's interpreter is not the interpreter running DevDock."
                 ),
-                evidence=declarations + (f"DevDock executable: {current_executable}",)
+                evidence=declarations
+                + (f"DevDock executable: {current_executable}",)
                 + interpreter_evidence,
                 remedy=None
                 if selected
@@ -462,9 +456,7 @@ def check_profile(
             )
         elif target.is_file():
             findings.append(
-                _finding(
-                    "REQUIRED_FILE_FOUND", "PASS", f"Required file found: {required_file}"
-                )
+                _finding("REQUIRED_FILE_FOUND", "PASS", f"Required file found: {required_file}")
             )
         else:
             findings.append(

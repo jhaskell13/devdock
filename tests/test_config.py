@@ -72,9 +72,7 @@ def test_rejects_unsafe_required_paths(path: str) -> None:
 @pytest.mark.parametrize("port", [0, 65536, True, "8080"])
 def test_rejects_invalid_ports(port: object) -> None:
     with pytest.raises(ValidationError):
-        ProjectProfile.model_validate(
-            {"schema_version": 1, "project": "sample", "ports": [port]}
-        )
+        ProjectProfile.model_validate({"schema_version": 1, "project": "sample", "ports": [port]})
 
 
 def test_rejects_duplicate_ports() -> None:
@@ -82,4 +80,3 @@ def test_rejects_duplicate_ports() -> None:
         ProjectProfile.model_validate(
             {"schema_version": 1, "project": "sample", "ports": [8080, 8080]}
         )
-

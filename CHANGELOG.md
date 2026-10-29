@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- `devdock --version`. Terminal output neutralizes control characters from container names and runtime data. The package ships a `py.typed` marker.
 - `devdock down` previews, confirms, then stops and removes a project's DevDock-managed containers and networks, re-checks what remains, and never removes volumes. Supports `--dry-run` and `--yes`.
 - `devdock status` reports each declared service's container, state, Compose health, readiness class, and published ports, lists resources DevDock does not own, and distinguishes running from ready.
 - `devdock up` starts a project's Compose services detached after passing diagnostic, Compose-file, runtime, and ownership gates. Captured Docker output is hidden by default, redacted on every path, and shown in full only with `--show-output`.

@@ -68,11 +68,7 @@ def discover_project_result(start: Path) -> DiscoveryResult:
     root = resolved_start
     matched: tuple[str, ...] = ()
     for candidate in candidates:
-        markers = tuple(
-            name
-            for name in ROOT_MARKERS
-            if (candidate / name).is_file()
-        )
+        markers = tuple(name for name in ROOT_MARKERS if (candidate / name).is_file())
         if markers:
             root, matched = candidate, markers
             break

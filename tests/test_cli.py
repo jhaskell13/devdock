@@ -43,9 +43,7 @@ def test_check_requires_a_profile(tmp_path: Path) -> None:
 
 
 def test_check_shows_target_interpreter_warning_without_failing(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
@@ -98,9 +96,7 @@ def test_inspect_explains_nested_roots_and_unicode_paths(tmp_path: Path) -> None
     inner = outer / "café"
     inner.mkdir(parents=True)
     (outer / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
-    (inner / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: nested\n", encoding="utf-8"
-    )
+    (inner / "devdock.yaml").write_text("schema_version: 1\nproject: nested\n", encoding="utf-8")
 
     result = runner.invoke(app, ["inspect", str(inner)])
 
@@ -119,7 +115,6 @@ def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
     assert "Could not create project directory" in result.stderr
 
 
-
 def test_inspect_reports_the_compose_project_name_devdock_will_manage(tmp_path: Path) -> None:
     (tmp_path / "devdock.yaml").write_text(
         "schema_version: 1\nproject: Sample App\n", encoding="utf-8"
@@ -132,9 +127,7 @@ def test_inspect_reports_the_compose_project_name_devdock_will_manage(tmp_path: 
 
 
 def test_up_refuses_without_a_compose_file_and_exits_non_zero(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
 
     result = runner.invoke(app, ["up", str(tmp_path)])
 
@@ -155,9 +148,7 @@ def test_up_requires_a_profile(tmp_path: Path) -> None:
 def test_up_reports_a_successful_start_on_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
     (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
 
     def fake_start(*_args: object, **_kwargs: object) -> LifecycleResult:
@@ -178,12 +169,8 @@ def test_up_rejects_a_non_positive_timeout(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
-def test_status_renders_a_report_on_stdout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+def test_status_renders_a_report_on_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
     (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
 
     def fake_status(*_args: object, **_kwargs: object) -> LifecycleResult:
@@ -198,9 +185,7 @@ def test_status_renders_a_report_on_stdout(
 
 
 def test_status_without_compose_file_exits_non_zero(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
 
     result = runner.invoke(app, ["status", str(tmp_path)])
 
@@ -209,9 +194,7 @@ def test_status_without_compose_file_exits_non_zero(tmp_path: Path) -> None:
 
 
 def _ready_project(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
     (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
 
 
@@ -221,11 +204,21 @@ def _fake_plan(tmp_path: Path, *, empty: bool = False) -> StopPlan:
     from devdock.ownership import assess_ownership, ownership_scope
 
     scope = ownership_scope(ProjectProfile(schema_version=1, project="sample"), tmp_path)
-    containers = () if empty else (
-        ContainerRecord(
-            "c1", f"{scope.project_name}-web-1", "running", scope.project_name,
-            str(scope.root), str(scope.compose_file), "web", "False",
-        ),
+    containers = (
+        ()
+        if empty
+        else (
+            ContainerRecord(
+                "c1",
+                f"{scope.project_name}-web-1",
+                "running",
+                scope.project_name,
+                str(scope.root),
+                str(scope.compose_file),
+                "web",
+                "False",
+            ),
+        )
     )
     inventory = ResourceInventory(scope.project_name, containers=containers)
     assessment = assess_ownership(scope, inventory)
@@ -321,9 +314,7 @@ def test_down_with_nothing_to_do_needs_no_confirmation(
 
 
 def test_down_refusal_from_planning_is_rendered(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
 
     result = runner.invoke(app, ["down", str(tmp_path), "--yes"])
 

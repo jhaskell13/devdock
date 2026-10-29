@@ -21,11 +21,12 @@ Run the checks from the repository root. On Windows, use the virtual environment
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m ruff format --check src tests
 .\.venv\Scripts\python.exe -m mypy src/devdock
 .\.venv\Scripts\python.exe -m build
 ```
 
-On Linux or macOS, use the equivalent `python -m ...` commands after activating `.venv`.
+On Linux or macOS, use the equivalent `python -m ...` commands after activating `.venv`. Code is formatted with `ruff format`; run it before committing, or install the optional pre-commit hooks from `.pre-commit-config.yaml`.
 
 Add or update tests when behavior changes. Prefer synthetic temporary project directories and fake adapters. Unit tests must not require a running Docker daemon, real credentials, personal data, or access to production systems.
 

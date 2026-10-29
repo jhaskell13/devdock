@@ -111,4 +111,3 @@ def load_profile(path: Path) -> ProjectProfile:
             for error in exc.errors()
         )
         raise ProfileError(details) from exc
-

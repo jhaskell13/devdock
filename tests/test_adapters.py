@@ -197,8 +197,14 @@ def test_inventory_rejects_unsafe_project_names_before_running_anything() -> Non
 
 def test_inventory_parses_container_fields_and_flags_malformed_lines() -> None:
     good = container_line(
-        "id1", "devdock-s-0123456789ab-web-1", "running",
-        "devdock-s-0123456789ab", "/proj", "/proj/compose.yaml", "web", "False",
+        "id1",
+        "devdock-s-0123456789ab-web-1",
+        "running",
+        "devdock-s-0123456789ab",
+        "/proj",
+        "/proj/compose.yaml",
+        "web",
+        "False",
     )
     bad = container_line("id2", "broken", "running")
     runner = RecordingRunner(
@@ -267,11 +273,16 @@ def test_start_uses_devdock_controlled_options_only(tmp_path: Path) -> None:
     assert outcome.succeeded and outcome.returncode == 0
     args, cwd, timeout = runner.calls[0]
     assert args == [
-        "docker", "compose",
-        "--project-directory", str(tmp_path),
-        "--file", str(compose_file),
-        "--project-name", "devdock-s-0123456789ab",
-        "up", "--detach",
+        "docker",
+        "compose",
+        "--project-directory",
+        str(tmp_path),
+        "--file",
+        str(compose_file),
+        "--project-name",
+        "devdock-s-0123456789ab",
+        "up",
+        "--detach",
     ]
     assert cwd == tmp_path and timeout == 30
 
@@ -424,9 +435,7 @@ ENTRY = (
     ],
     ids=["json-array", "ndjson-single", "ndjson-multiple"],
 )
-def test_observe_services_parses_both_compose_output_shapes(
-    tmp_path: Path, payload: str
-) -> None:
+def test_observe_services_parses_both_compose_output_shapes(tmp_path: Path, payload: str) -> None:
     adapter = observing(CommandResult(0, payload, ""))
 
     result = observe(adapter, tmp_path)
@@ -446,7 +455,13 @@ def test_observe_services_discards_image_command_and_labels(tmp_path: Path) -> N
     assert "SECRET123" not in rendered and "LEAKED" not in rendered
     assert "private/registry" not in rendered
     assert set(ServiceObservation.__dataclass_fields__) == {
-        "id", "name", "service", "state", "health", "exit_code", "ports",
+        "id",
+        "name",
+        "service",
+        "state",
+        "health",
+        "exit_code",
+        "ports",
     }
 
 
@@ -499,10 +514,14 @@ def test_stop_runs_plain_compose_down_scoped_to_the_project(tmp_path: Path) -> N
     assert outcome.succeeded
     args, cwd, timeout = runner.calls[0]
     assert args == [
-        "docker", "compose",
-        "--project-directory", str(tmp_path),
-        "--file", str(compose_file),
-        "--project-name", "devdock-s-0123456789ab",
+        "docker",
+        "compose",
+        "--project-directory",
+        str(tmp_path),
+        "--file",
+        str(compose_file),
+        "--project-name",
+        "devdock-s-0123456789ab",
         "down",
     ]
     assert cwd == tmp_path and timeout == 60

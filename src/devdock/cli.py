@@ -155,8 +155,7 @@ def _render(result: LifecycleResult) -> None:
     """Print a lifecycle result and exit non-zero when it did not succeed."""
 
     stream_err = not result.ok
-    _echo(f"[{'OK' if result.ok else 'REFUSED'}] {result.code}: {result.summary}",
-               err=stream_err)
+    _echo(f"[{'OK' if result.ok else 'REFUSED'}] {result.code}: {result.summary}", err=stream_err)
     for line in result.lines:
         _echo(line, err=stream_err)
     if result.remedy:
@@ -180,11 +179,7 @@ def up(
     """Start the project's Compose services detached, without waiting for readiness."""
 
     root, profile = _load_project(directory)
-    _render(
-        start_project(
-            profile, root, timeout=timeout, show_output=show_output
-        )
-    )
+    _render(start_project(profile, root, timeout=timeout, show_output=show_output))
 
 
 @app.command()
@@ -268,4 +263,3 @@ def check(
 
 if __name__ == "__main__":
     app()
-

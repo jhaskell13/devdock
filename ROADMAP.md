@@ -57,17 +57,19 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 2. Docker Compose adapter and lifecycle
 
-- Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
-- Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
-- Define project-scoped resource naming/labels so DevDock can identify what it owns without claiming unrelated containers.
-- Implement `devdock up` with bounded execution, captured output, useful error summaries, and an option to show full runtime output.
-- Implement `devdock status` with per-service state, health, and relevant published ports.
-- Implement `devdock down` as a scoped stop operation with a preview of affected services.
-- Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations.
-- Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
-- Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
-- Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
-- Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects.
+**Status:** In progress. The adapter boundary, ownership model, and `up`, `status`, and `down` commands are implemented and unit-tested with fake runners; no live daemon is required. Remaining: a finer error taxonomy for start failures and a separately gated disposable integration suite.
+
+- [x] Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
+- [x] Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
+- [x] Define project-scoped resource naming/labels so DevDock can identify what it owns without claiming unrelated containers.
+- [x] Implement `devdock up` with bounded execution, captured output, useful error summaries, and an option to show full runtime output.
+- [x] Implement `devdock status` with per-service state, health, and relevant published ports.
+- [x] Implement `devdock down` as a scoped stop operation with a preview of affected services.
+- [x] Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations. (DevDock controls project name, directory, and file; nothing passes through in this version.)
+- [x] Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
+- [ ] Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
+- [ ] Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
+- [ ] Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects. (Idempotence is unit-tested; the unrelated-project check needs the integration suite.)
 
 **Acceptance:** A sample project can be started, queried, and stopped repeatedly; DevDock reports ownership scope before actions and leaves unrelated resources untouched.
 

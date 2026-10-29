@@ -98,9 +98,7 @@ def test_successful_start_passes_the_derived_scope_to_the_adapter(tmp_path: Path
 
 
 def test_success_states_that_readiness_was_not_verified(tmp_path: Path) -> None:
-    result = start_project(
-        profile(), make_project(tmp_path), adapter=FakeAdapter(), environ={}
-    )
+    result = start_project(profile(), make_project(tmp_path), adapter=FakeAdapter(), environ={})
 
     assert any("readiness was not verified" in line for line in result.lines)
 
@@ -130,9 +128,7 @@ def test_repeated_start_is_idempotent_when_resources_are_already_ours(
         service="web",
         oneoff="False",
     )
-    adapter = FakeAdapter(
-        inventory=ResourceInventory(scope.project_name, containers=(running,))
-    )
+    adapter = FakeAdapter(inventory=ResourceInventory(scope.project_name, containers=(running,)))
 
     first = start_project(profile(), root, adapter=adapter, environ={})
     second = start_project(profile(), root, adapter=adapter, environ={})
@@ -215,12 +211,8 @@ def test_runtime_problems_block_the_start(
 def test_ownership_conflict_blocks_the_start_and_explains_why(tmp_path: Path) -> None:
     root = make_project(tmp_path)
     scope = ownership_scope(profile(), root)
-    intruder = ContainerRecord(
-        id="x1", name=f"{scope.project_name}-web-1", state="running"
-    )
-    adapter = FakeAdapter(
-        inventory=ResourceInventory(scope.project_name, containers=(intruder,))
-    )
+    intruder = ContainerRecord(id="x1", name=f"{scope.project_name}-web-1", state="running")
+    adapter = FakeAdapter(inventory=ResourceInventory(scope.project_name, containers=(intruder,)))
 
     result = start_project(profile(), root, adapter=adapter, environ={})
 
@@ -363,8 +355,13 @@ def managed(  # type: ignore[no-untyped-def]
     scope, name: str, service: str, state: str = "running", identifier: str = ""
 ) -> ContainerRecord:
     return ContainerRecord(
-        id=identifier or f"id-{name}", name=name, state=state, project=scope.project_name,
-        working_dir=str(scope.root), config_files=str(scope.compose_file), service=service,
+        id=identifier or f"id-{name}",
+        name=name,
+        state=state,
+        project=scope.project_name,
+        working_dir=str(scope.root),
+        config_files=str(scope.compose_file),
+        service=service,
         oneoff="False",
     )
 
@@ -378,7 +375,12 @@ def test_status_reports_declared_managed_and_observed_services(tmp_path: Path) -
         observed=ServiceObservations(
             items=(
                 ServiceObservation(
-                    web.id, web.name, "web", "running", "healthy", 0,
+                    web.id,
+                    web.name,
+                    "web",
+                    "running",
+                    "healthy",
+                    0,
                     (PublishedPort("0.0.0.0", 8080, 80, "tcp"),),
                 ),
             )
@@ -407,9 +409,7 @@ def test_status_reports_conflicts_instead_of_refusing(tmp_path: Path) -> None:
     root = make_project(tmp_path)
     scope = ownership_scope(profile(), root)
     squatter = ContainerRecord(id="q", name=f"{scope.project_name}-web-1", state="running")
-    adapter = StatusAdapter(
-        inventory=ResourceInventory(scope.project_name, containers=(squatter,))
-    )
+    adapter = StatusAdapter(inventory=ResourceInventory(scope.project_name, containers=(squatter,)))
 
     result = project_status(profile(), root, adapter=adapter)
     text = "\n".join(result.lines)

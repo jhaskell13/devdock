@@ -48,18 +48,34 @@ def record(
     name: str, service: str, state: str = "running", identifier: str = ""
 ) -> ContainerRecord:
     return ContainerRecord(
-        id=identifier or f"id-{name}", name=name, state=state, project="p", working_dir="/p",
-        config_files="/p/compose.yaml", service=service, oneoff="False",
+        id=identifier or f"id-{name}",
+        name=name,
+        state=state,
+        project="p",
+        working_dir="/p",
+        config_files="/p/compose.yaml",
+        service=service,
+        oneoff="False",
     )
 
 
 def observation(
-    name: str, service: str, state: str = "running", health: str = "", exit_code: int | None = None,
-    ports: tuple[PublishedPort, ...] = (), identifier: str = "",
+    name: str,
+    service: str,
+    state: str = "running",
+    health: str = "",
+    exit_code: int | None = None,
+    ports: tuple[PublishedPort, ...] = (),
+    identifier: str = "",
 ) -> ServiceObservation:
     return ServiceObservation(
-        id=identifier or f"id-{name}", name=name, service=service, state=state, health=health,
-        exit_code=exit_code, ports=ports,
+        id=identifier or f"id-{name}",
+        name=name,
+        service=service,
+        state=state,
+        health=health,
+        exit_code=exit_code,
+        ports=ports,
     )
 
 

@@ -4,9 +4,7 @@ from devdock.redaction import MAX_SUMMARY_LINES, redact, summarize
 def test_environment_values_are_replaced_by_their_names() -> None:
     environ = {"DB_PASSWORD": "hunter2-very-secret", "API_TOKEN": "tok_abcdef123456"}
 
-    text = redact(
-        "connecting with hunter2-very-secret and tok_abcdef123456", environ
-    )
+    text = redact("connecting with hunter2-very-secret and tok_abcdef123456", environ)
 
     assert "hunter2-very-secret" not in text
     assert "tok_abcdef123456" not in text

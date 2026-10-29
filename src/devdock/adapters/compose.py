@@ -101,9 +101,7 @@ class ComposeAdapter:
             return ComposeCapabilities(executable=None, compose_cli="missing")
 
         try:
-            version = self._runner(
-                [executable, "compose", "version"], timeout=VERSION_TIMEOUT
-            )
+            version = self._runner([executable, "compose", "version"], timeout=VERSION_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired):
             return ComposeCapabilities(executable=executable, compose_cli="unresponsive")
         if version.returncode:
@@ -180,30 +178,44 @@ class ComposeAdapter:
             _parse_container(line)
             for line in query(
                 "Container query by project label",
-                ["ps", "--all", "--no-trunc", "--filter", label_filter,
-                 "--format", _CONTAINER_FORMAT],
+                [
+                    "ps",
+                    "--all",
+                    "--no-trunc",
+                    "--filter",
+                    label_filter,
+                    "--format",
+                    _CONTAINER_FORMAT,
+                ],
             )
         )
         collisions = tuple(
             _parse_container(line)
             for line in query(
                 "Container query by name prefix",
-                ["ps", "--all", "--no-trunc", "--filter", f"name=^{project_name}-",
-                 "--format", _CONTAINER_FORMAT],
+                [
+                    "ps",
+                    "--all",
+                    "--no-trunc",
+                    "--filter",
+                    f"name=^{project_name}-",
+                    "--format",
+                    _CONTAINER_FORMAT,
+                ],
             )
         )
         networks = tuple(
             _parse_network(line)
             for line in query(
-                "Network query", ["network", "ls", "--filter", label_filter,
-                                  "--format", _NETWORK_FORMAT],
+                "Network query",
+                ["network", "ls", "--filter", label_filter, "--format", _NETWORK_FORMAT],
             )
         )
         volumes = tuple(
             line.strip()
             for line in query(
-                "Volume query", ["volume", "ls", "--filter", label_filter,
-                                 "--format", _VOLUME_FORMAT],
+                "Volume query",
+                ["volume", "ls", "--filter", label_filter, "--format", _VOLUME_FORMAT],
             )
         )
         return ResourceInventory(
@@ -301,9 +313,7 @@ class ComposeAdapter:
             raw_stderr=result.stderr,
         )
 
-    def list_declared_services(
-        self, *, project_root: Path, compose_file: Path
-    ) -> DeclaredServices:
+    def list_declared_services(self, *, project_root: Path, compose_file: Path) -> DeclaredServices:
         """Run ``docker compose config --services``; output is names only."""
 
         executable = self._locate("docker")
@@ -406,7 +416,8 @@ def _parse_observation(raw: object) -> ServiceObservation | None:
         service=str(service),
         state=str(state).lower(),
         health=health.lower() if isinstance(health, str) else "",
-        exit_code=exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        exit_code=exit_code
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool)
         else None,
         ports=tuple(sorted(ports, key=lambda item: (item.host_port, item.container_port))),
     )

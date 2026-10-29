@@ -155,6 +155,7 @@ def _table(services: tuple[ServiceStatus, ...]) -> list[str]:
     ]
     header = ("SERVICE", "CONTAINER", "STATE", "HEALTH", "READINESS", "PORTS")
     widths = [max(len(row[index]) for row in (header, *rows)) for index in range(len(header))]
+
     def render(cells: tuple[str, ...]) -> str:
         return "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(cells)).rstrip()
 

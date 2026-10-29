@@ -300,8 +300,15 @@ def test_container_model_holds_only_identity_and_ownership_fields() -> None:
     # Nothing else about a container (image, env, full label set) exists in the
     # model, so the explanation cannot leak it.
     assert set(ContainerRecord.__dataclass_fields__) == {
-        "id", "name", "state", "project", "working_dir", "config_files",
-        "service", "oneoff", "parse_error",
+        "id",
+        "name",
+        "state",
+        "project",
+        "working_dir",
+        "config_files",
+        "service",
+        "oneoff",
+        "parse_error",
     }
 
 

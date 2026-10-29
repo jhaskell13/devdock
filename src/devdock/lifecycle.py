@@ -135,9 +135,7 @@ def start_project(
         return _refusal(
             "UP_TIMED_OUT",
             f"Start did not finish within {timeout:g} seconds and was stopped.",
-            preview
-            + ("Containers may have been created before the timeout.",)
-            + captured,
+            preview + ("Containers may have been created before the timeout.",) + captured,
             "Run 'devdock up' again with a longer --timeout, or inspect the project with "
             "the docker ps command above.",
         )
@@ -277,8 +275,9 @@ def project_status(
             report.explain(),
             "Retry; if it persists, run the docker commands above by hand to see the error.",
         )
-    return LifecycleResult("STATUS_REPORTED", True, f"Status for {scope.project_name}.",
-                           report.explain())
+    return LifecycleResult(
+        "STATUS_REPORTED", True, f"Status for {scope.project_name}.", report.explain()
+    )
 
 
 @dataclass(frozen=True)
@@ -313,8 +312,10 @@ class StopPlan:
             )
             lines.extend(f"  {item.name} [{item.service}]" for item in self.remaining)
         if self.volumes:
-            lines.append(f"Will preserve {len(self.volumes)} volume(s); DevDock never removes "
-                         "volumes in this version:")
+            lines.append(
+                f"Will preserve {len(self.volumes)} volume(s); DevDock never removes "
+                "volumes in this version:"
+            )
             lines.extend(f"  {name}" for name in self.volumes)
         else:
             lines.append("Volumes: none under this project name.")
@@ -473,8 +474,9 @@ def execute_stop(
     return LifecycleResult(
         code,
         code == "DOWN_STOPPED",
-        f"Stopped {scope.project_name}." if code == "DOWN_STOPPED" else
-        f"Stopped {scope.project_name} with resources remaining.",
+        f"Stopped {scope.project_name}."
+        if code == "DOWN_STOPPED"
+        else f"Stopped {scope.project_name} with resources remaining.",
         tuple(lines),
         None if code == "DOWN_STOPPED" else "Run 'devdock status' and retry 'devdock down'.",
     )
