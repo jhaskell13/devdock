@@ -7,7 +7,7 @@ names DevDock treats as proof of ownership, the field names in `compose ps
 
 from __future__ import annotations
 
-import socket
+import shutil
 import time
 from pathlib import Path
 
@@ -25,7 +25,7 @@ from devdock.lifecycle import (
     project_status,
     start_project,
 )
-from devdock.ownership import OwnershipScope, assess_ownership
+from devdock.ownership import OwnershipScope, assess_ownership, ownership_scope
 
 pytestmark = pytest.mark.docker
 
@@ -187,21 +187,32 @@ def test_a_foreign_container_under_the_project_name_blocks_action(
     assert still_running.stdout.strip() == name
 
 
-def test_port_conflict_is_classified_from_real_runtime_output(project: Path) -> None:
-    """Validates a failure-taxonomy marker against Docker's actual phrasing."""
+def test_port_conflict_is_classified_from_real_runtime_output(
+    project: Path, tmp_path: Path
+) -> None:
+    """Validates a failure-taxonomy marker against Docker's actual phrasing.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as blocker:
-        blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            blocker.bind(("0.0.0.0", 18080))
-        except OSError:
-            pytest.skip("Port 18080 is already in use by something else.")
-        blocker.listen()
+    The conflict is provoked with a second Compose project competing for the
+    same published port, not by binding the port in this process. Only a native
+    Linux daemon shares a network namespace with the test runner; Docker
+    Desktop publishes ports inside its own VM, so a local bind would not
+    collide and the start would legitimately succeed.
+    """
 
-        result = start_project(profile_at(project), project, adapter=adapter(), timeout=180)
+    start(project)
 
-    assert result.code == "UP_PORT_CONFLICT", result.summary
-    assert "Runtime output is hidden" in "\n".join(result.lines)
+    rival = tmp_path / "rival"
+    shutil.copytree(project, rival)
+    rival_name = ownership_scope(profile_at(rival), rival).project_name
+    assert rival_name != ownership_scope(profile_at(project), project).project_name
+    try:
+        result = start_project(profile_at(rival), rival, adapter=adapter(), timeout=180)
+    finally:
+        compose_teardown(rival, rival_name)
+
+    detail = f"{result.summary}\n" + "\n".join(result.lines)
+    assert result.code == "UP_PORT_CONFLICT", detail
+    assert "Runtime output is hidden" in detail
 
 
 def test_missing_image_is_classified_from_real_runtime_output(project: Path) -> None:
