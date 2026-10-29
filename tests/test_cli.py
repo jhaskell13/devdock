@@ -2,7 +2,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-import devdock.diagnostics as diagnostics
+import devdock.adapters.compose as compose
 from devdock.cli import app
 
 runner = CliRunner()
@@ -60,7 +60,7 @@ def test_check_reports_skipped_dependency_checks_and_preserves_failure_exit(
         "schema_version: 1\nproject: sample\nruntimes:\n  docker: compose\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: None)
+    monkeypatch.setattr(compose.shutil, "which", lambda _: None)
 
     result = runner.invoke(app, ["check", str(tmp_path)])
 

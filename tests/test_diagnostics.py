@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import devdock.adapters.compose as compose
 import devdock.diagnostics as diagnostics
 from devdock.config import ProjectProfile
 from devdock.diagnostics import check_profile
@@ -275,8 +276,8 @@ def test_compose_file_symlink_cannot_escape_project(
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(Path, "resolve", resolve_escape)
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.subprocess, "run", fake_run)
 
     findings = check_profile(profile, tmp_path)
 
@@ -317,13 +318,13 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
         ]
     )
     calls: list[list[str]] = []
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
 
     def fake_run(command: list[str], **_: object) -> SimpleNamespace:
         calls.append(command)
         return next(results)
 
-    monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
+    monkeypatch.setattr(compose.subprocess, "run", fake_run)
 
     findings = check_profile(profile, tmp_path)
     codes = {item.code for item in findings}
@@ -355,8 +356,8 @@ def test_compose_parser_errors_do_not_echo_interpolated_values(
             SimpleNamespace(returncode=1, stdout="", stderr="TOKEN=secret-value"),
         ]
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: next(responses))
 
     findings = check_profile(profile, tmp_path)
     invalid = next(item for item in findings if item.code == "COMPOSE_CONFIG_INVALID")
@@ -386,10 +387,10 @@ def test_compose_reports_missing_cli_or_plugin(
     profile = ProjectProfile(
         schema_version=1, project="sample", runtimes={"docker": "compose"}
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: docker_path)
+    monkeypatch.setattr(compose.shutil, "which", lambda _: docker_path)
     if compose_result is not None:
         monkeypatch.setattr(
-            diagnostics.subprocess, "run", lambda *_args, **_kwargs: compose_result
+            compose.subprocess, "run", lambda *_args, **_kwargs: compose_result
         )
 
     findings = check_profile(profile, tmp_path)
@@ -416,8 +417,8 @@ def test_compose_parser_is_checked_even_when_daemon_is_unavailable(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
+    monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: next(responses))
 
     findings = check_profile(profile, tmp_path)
     codes = {item.code for item in findings}

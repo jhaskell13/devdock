@@ -13,6 +13,11 @@ Typer commands
 Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
 
+Runtime adapter (adapters/)
+  ├─ RuntimeAdapter protocol: capability detection and config validation
+  ├─ ComposeAdapter: argument arrays, bounded timeouts, injectable CommandRunner
+  └─ results carry status only; captured output is never copied into findings
+
 Diagnostics
   ├─ structured findings with stable code, severity, evidence, and remediation
   ├─ declared Python minimum and exact DevDock interpreter
@@ -22,7 +27,7 @@ Diagnostics
   └─ loopback TCP port availability probes
 ```
 
-`discovery.py` locates the nearest ancestor with a DevDock profile, common Compose filename, or supported project manifest and returns the evidence, marked ancestors, and filename-only inventory. `metadata.py` reads bounded, project-contained Python version declarations from `pyproject.toml`, `.python-version`, and `.tool-versions`; it does not execute project code or read environment templates. `config.py` owns the profile schema and parsing errors. `diagnostics.py` returns structured findings; the CLI renders them and chooses the process exit code. Runtime output that may contain interpolated values is not included in findings.
+`adapters/base.py` defines the adapter contract and status-only result types; `adapters/compose.py` is the only module that locates the Docker executable and runs it. `discovery.py` locates the nearest ancestor with a DevDock profile, common Compose filename, or supported project manifest and returns the evidence, marked ancestors, and filename-only inventory. `metadata.py` reads bounded, project-contained Python version declarations from `pyproject.toml`, `.python-version`, and `.tool-versions`; it does not execute project code or read environment templates. `config.py` owns the profile schema and parsing errors. `diagnostics.py` returns structured findings; the CLI renders them and chooses the process exit code. Runtime output that may contain interpolated values is not included in findings.
 
 ## Profile contract, version 1
 
@@ -40,7 +45,7 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 
 ## Adapter boundary
 
-The initial diagnostics call the local Docker CLI directly and do not manage containers. Before adding `up`, `status`, and `down`, isolate Compose operations behind a runtime adapter with explicit inspect/start/status/stop methods. Lifecycle state should identify only resources DevDock created. Destructive cleanup and volume removal require a separate preview/authorization design.
+All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns `ComposeCapabilities` and `ConfigValidation` values that contain exit status and executable paths but no captured output. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. Lifecycle methods (start, status, stop, resource identification) are added to the protocol by the milestone that implements them, so the contract never advertises unimplemented behavior. Lifecycle state should identify only resources DevDock created. Destructive cleanup and volume removal require a separate preview/authorization design.
 
 SQLite is deferred until the product needs durable snapshots or recovery state. The first milestone has no daemon, web UI, cloud connection, credential store, or AI features.
 

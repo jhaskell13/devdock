@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import socket
-import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from devdock.adapters import ComposeAdapter, RuntimeAdapter
 from devdock.config import ProjectProfile
 from devdock.discovery import COMPOSE_NAMES
 from devdock.metadata import read_python_metadata
@@ -97,7 +96,12 @@ def _project_python_interpreters(root: Path) -> tuple[Path, ...]:
     return tuple(Path(os.path.abspath(path)) for path in candidates)
 
 
-def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding]) -> None:
+def _check_compose(
+    profile: ProjectProfile,
+    root: Path,
+    findings: list[Finding],
+    adapter: RuntimeAdapter,
+) -> None:
     requirement = profile.runtimes.get("docker")
     if requirement is None:
         return
@@ -153,7 +157,8 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
     else:
         compose_file_ready = True
 
-    executable = shutil.which("docker")
+    capabilities = adapter.detect_capabilities()
+    executable = capabilities.executable
     if executable is None:
         findings.append(
             _finding(
@@ -175,46 +180,22 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
         )
         return
 
-    try:
-        version = subprocess.run(
-            [executable, "compose", "version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    if not capabilities.compose_available:
+        if capabilities.compose_cli == "unresponsive":
+            summary = "Could not query the Docker Compose plugin."
+            evidence: tuple[str, ...] = (f"Executable: {executable}",)
+        else:
+            summary = "Docker CLI is present but its Compose plugin did not respond successfully."
+            evidence = (
+                f"Executable: {executable}",
+                f"Exit code: {capabilities.compose_cli_returncode}",
+            )
         findings.append(
             _finding(
                 "COMPOSE_CLI_UNAVAILABLE",
                 "FAIL",
-                "Could not query the Docker Compose plugin.",
-                evidence=(f"Executable: {executable}",),
-                remedy="Install or enable the Docker Compose plugin, then retry.",
-            )
-        )
-        findings.append(
-            _compose_skipped(
-                "DOCKER_DAEMON_SKIPPED",
-                "Docker daemon check",
-                "The Compose CLI/plugin did not respond.",
-            )
-        )
-        findings.append(
-            _compose_skipped(
-                "COMPOSE_CONFIG_SKIPPED",
-                "Compose config check",
-                "The Compose CLI/plugin did not respond.",
-            )
-        )
-        return
-    if version.returncode:
-        findings.append(
-            _finding(
-                "COMPOSE_CLI_UNAVAILABLE",
-                "FAIL",
-                "Docker CLI is present but its Compose plugin did not respond successfully.",
-                evidence=(f"Executable: {executable}", f"Exit code: {version.returncode}"),
+                summary,
+                evidence=evidence,
                 remedy="Install or enable the Docker Compose plugin, then retry.",
             )
         )
@@ -242,32 +223,22 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
         )
     )
 
-    try:
-        daemon = subprocess.run(
-            [executable, "info", "--format", "{{.ServerVersion}}"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        daemon = None
-    if daemon is None or daemon.returncode:
-        findings.append(
-            _finding(
-                "DOCKER_DAEMON_UNAVAILABLE",
-                "FAIL",
-                "Docker CLI is available, but the daemon did not respond.",
-                remedy="Start Docker Desktop or the Docker Engine service and retry.",
-            )
-        )
-    else:
+    if capabilities.daemon_available:
         findings.append(
             _finding(
                 "DOCKER_DAEMON_AVAILABLE",
                 "PASS",
                 "Docker daemon is reachable.",
                 evidence=("Docker info request succeeded.",),
+            )
+        )
+    else:
+        findings.append(
+            _finding(
+                "DOCKER_DAEMON_UNAVAILABLE",
+                "FAIL",
+                "Docker CLI is available, but the daemon did not respond.",
+                remedy="Start Docker Desktop or the Docker Engine service and retry.",
             )
         )
 
@@ -280,34 +251,8 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
             )
         )
         return
-    try:
-        parsed = subprocess.run(
-            [executable, "compose", "-f", str(compose_path), "config", "--quiet"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        parsed = None
-    if parsed is None or parsed.returncode:
-        code = "COMPOSE_CONFIG_UNAVAILABLE" if parsed is None else "COMPOSE_CONFIG_INVALID"
-        evidence = (f"File: {compose_path}",) if parsed is None else (
-            f"File: {compose_path}", f"Exit code: {parsed.returncode}",
-        )
-        findings.append(
-            _finding(
-                code,
-                "FAIL",
-                "Compose configuration could not be validated. Output is suppressed to avoid "
-                "exposing interpolated values.",
-                evidence=evidence,
-                remedy="Run 'docker compose config' locally to inspect the validation error, "
-                "then correct the file.",
-            )
-        )
-    else:
+    validation = adapter.validate_config(compose_path, project_root=root)
+    if validation.valid:
         findings.append(
             _finding(
                 "COMPOSE_CONFIG_VALID",
@@ -316,6 +261,24 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 evidence=(f"File: {compose_path}",),
             )
         )
+        return
+    if validation.outcome == "unavailable":
+        code = "COMPOSE_CONFIG_UNAVAILABLE"
+        evidence = (f"File: {compose_path}",)
+    else:
+        code = "COMPOSE_CONFIG_INVALID"
+        evidence = (f"File: {compose_path}", f"Exit code: {validation.returncode}")
+    findings.append(
+        _finding(
+            code,
+            "FAIL",
+            "Compose configuration could not be validated. Output is suppressed to avoid "
+            "exposing interpolated values.",
+            evidence=evidence,
+            remedy="Run 'docker compose config' locally to inspect the validation error, "
+            "then correct the file.",
+        )
+    )
 
 
 def check_profile(
@@ -323,10 +286,15 @@ def check_profile(
     root: Path,
     *,
     environ: Mapping[str, str] | None = None,
+    adapter: RuntimeAdapter | None = None,
 ) -> list[Finding]:
-    """Return actionable diagnostics without changing the project or host."""
+    """Return actionable diagnostics without changing the project or host.
+
+    ``adapter`` defaults to the local Docker Compose adapter; tests pass a fake.
+    """
 
     env = os.environ if environ is None else environ
+    compose_adapter = ComposeAdapter() if adapter is None else adapter
     findings: list[Finding] = [
         _finding("PROFILE_VALID", "PASS", f"Profile is valid for {profile.project}")
     ]
@@ -446,7 +414,7 @@ def check_profile(
                 )
             )
 
-    _check_compose(profile, root, findings)
+    _check_compose(profile, root, findings, compose_adapter)
 
     if profile.compose_file is not None and "docker" not in profile.runtimes:
         compose_path = root / profile.compose_file
