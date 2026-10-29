@@ -13,11 +13,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from devdock.adapters import ComposeAdapter, RuntimeAdapter
-from devdock.adapters.compose import START_TIMEOUT
+from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, RuntimeAdapter
+from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
 from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
-from devdock.ownership import assess_ownership, ownership_scope, resolves_inside
+from devdock.ownership import (
+    OwnershipAssessment,
+    OwnershipScope,
+    assess_ownership,
+    ownership_scope,
+    resolves_inside,
+)
 from devdock.redaction import redact, summarize
 from devdock.status import ProjectStatus, build_service_statuses
 
@@ -273,3 +279,202 @@ def project_status(
         )
     return LifecycleResult("STATUS_REPORTED", True, f"Status for {scope.project_name}.",
                            report.explain())
+
+
+@dataclass(frozen=True)
+class StopPlan:
+    """Preview of a stop: exactly what will change and what will not."""
+
+    scope: OwnershipScope
+    assessment: OwnershipAssessment
+    affected: tuple[ContainerRecord, ...]
+    remaining: tuple[ContainerRecord, ...]
+    networks: tuple[NetworkRecord, ...]
+    volumes: tuple[str, ...]
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return not self.affected and not self.networks
+
+    def explain(self) -> tuple[str, ...]:
+        lines = list(self.scope.describe()[:3])
+        if self.affected:
+            lines.append(f"Will stop and remove {len(self.affected)} container(s):")
+            lines.extend(f"  {item.name} [{item.service}] {item.state}" for item in self.affected)
+        else:
+            lines.append("Will stop and remove containers: none are running or stopped.")
+        if self.networks:
+            lines.append(f"Will remove {len(self.networks)} project network(s):")
+            lines.extend(f"  {item.name}" for item in self.networks)
+        if self.remaining:
+            lines.append(
+                f"Will leave {len(self.remaining)} DevDock container(s) whose service is no "
+                "longer declared in the Compose file:"
+            )
+            lines.extend(f"  {item.name} [{item.service}]" for item in self.remaining)
+        if self.volumes:
+            lines.append(f"Will preserve {len(self.volumes)} volume(s); DevDock never removes "
+                         "volumes in this version:")
+            lines.extend(f"  {name}" for name in self.volumes)
+        else:
+            lines.append("Volumes: none under this project name.")
+        return tuple(lines)
+
+
+def plan_stop(
+    profile: ProjectProfile,
+    root: Path,
+    *,
+    adapter: RuntimeAdapter | None = None,
+) -> StopPlan | LifecycleResult:
+    """Build the stop preview, or a refusal if the project cannot be acted on."""
+
+    runtime = ComposeAdapter() if adapter is None else adapter
+    scope = ownership_scope(profile, root)
+    if scope.compose_file is None:
+        return _refusal(
+            "DOWN_COMPOSE_FILE_MISSING",
+            "Refusing to stop: no Compose file is configured or discoverable.",
+            (f"Project root: {scope.root}",),
+            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
+        )
+    if not resolves_inside(scope.compose_file, scope.root):
+        return _refusal(
+            "DOWN_COMPOSE_FILE_OUTSIDE_PROJECT",
+            "Refusing to stop: the Compose file does not resolve inside the project.",
+            (f"Compose file: {scope.compose_file}",),
+            "Remove the escaping symlink or choose a project-contained Compose file.",
+        )
+    if not scope.compose_file.is_file():
+        return _refusal(
+            "DOWN_COMPOSE_FILE_MISSING",
+            "Refusing to stop: the configured Compose file does not exist.",
+            (f"Expected path: {scope.compose_file}",),
+            "Restore the file; Compose needs it to identify the project's resources.",
+        )
+
+    capabilities = runtime.detect_capabilities()
+    if not capabilities.compose_available:
+        return _refusal(
+            "DOWN_RUNTIME_UNAVAILABLE",
+            "Refusing to stop: the Docker Compose CLI is not available.",
+            (),
+            "Install Docker with the Compose plugin, then retry.",
+        )
+    if not capabilities.daemon_available:
+        return _refusal(
+            "DOWN_DAEMON_UNAVAILABLE",
+            "Refusing to stop: the Docker daemon did not respond.",
+            (),
+            "Start Docker Desktop or the Docker Engine service and retry.",
+        )
+
+    assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
+    if not assessment.safe_to_act:
+        return _refusal(
+            "DOWN_OWNERSHIP_CONFLICT",
+            "Refusing to stop: resources under this project name are not DevDock's.",
+            assessment.explain(),
+            "Resolve the conflicts above, then retry.",
+        )
+    declared = runtime.list_declared_services(
+        project_root=scope.root, compose_file=scope.compose_file
+    )
+    if declared.error:
+        return _refusal(
+            "DOWN_CONFIG_UNREADABLE",
+            "Refusing to stop: the Compose file's services could not be listed.",
+            (declared.error,),
+            "Run 'docker compose config' locally to see the error, then correct the file.",
+        )
+    declared_names = set(declared.names)
+    affected = tuple(item for item in assessment.managed if item.service in declared_names)
+    remaining = tuple(item for item in assessment.managed if item.service not in declared_names)
+    return StopPlan(
+        scope=scope,
+        assessment=assessment,
+        affected=affected,
+        remaining=remaining,
+        networks=assessment.networks,
+        volumes=assessment.volumes,
+    )
+
+
+def execute_stop(
+    plan: StopPlan,
+    *,
+    adapter: RuntimeAdapter | None = None,
+    environ: Mapping[str, str] | None = None,
+    timeout: float = STOP_TIMEOUT,
+    show_output: bool = False,
+) -> LifecycleResult:
+    """Carry out an approved stop plan and verify what remains afterwards."""
+
+    runtime = ComposeAdapter() if adapter is None else adapter
+    env = os.environ if environ is None else environ
+    scope = plan.scope
+    assert scope.compose_file is not None  # plan_stop guarantees this
+    if plan.nothing_to_do:
+        return LifecycleResult(
+            "DOWN_NOTHING_TO_STOP",
+            True,
+            f"Nothing to stop for {scope.project_name}.",
+            plan.explain(),
+        )
+
+    outcome = runtime.stop(
+        project_name=scope.project_name,
+        project_root=scope.root,
+        compose_file=scope.compose_file,
+        timeout=timeout,
+    )
+    captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
+    if outcome.status == "unavailable":
+        return _refusal(
+            "DOWN_RUNTIME_UNAVAILABLE",
+            "The Docker CLI could not be started.",
+            (),
+            "Confirm Docker is installed and on PATH, then retry.",
+        )
+    if outcome.status == "timed_out":
+        return _refusal(
+            "DOWN_TIMED_OUT",
+            f"Stop did not finish within {timeout:g} seconds and was interrupted.",
+            ("Some containers may already be stopped or removed.",) + captured,
+            "Run 'devdock status' to see what remains, then run 'devdock down' again.",
+        )
+    if outcome.status == "failed":
+        return _refusal(
+            "DOWN_FAILED",
+            f"Docker Compose could not stop the project (exit code {outcome.returncode}).",
+            captured,
+            "Correct the error reported above, then retry. Use --show-output for the full "
+            "runtime output.",
+        )
+
+    after = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
+    lines: list[str] = list(captured)
+    leftover = tuple(item for item in after.managed if item.id in {a.id for a in plan.affected})
+    if leftover:
+        lines.append(f"Warning: {len(leftover)} container(s) still exist after down:")
+        lines.extend(f"  {item.name} {item.state}" for item in leftover)
+    if after.networks:
+        lines.append(f"Warning: {len(after.networks)} project network(s) still exist.")
+    if plan.remaining:
+        lines.append(
+            f"Left in place as planned: {len(plan.remaining)} container(s) from undeclared "
+            "services."
+        )
+    if after.volumes:
+        lines.append(f"Preserved {len(after.volumes)} volume(s): " + ", ".join(after.volumes))
+    if after.errors:
+        lines.append("Post-stop inventory was incomplete: " + "; ".join(after.errors))
+    code = "DOWN_STOPPED" if not leftover and not after.networks else "DOWN_PARTIAL"
+    return LifecycleResult(
+        code,
+        code == "DOWN_STOPPED",
+        f"Stopped {scope.project_name}." if code == "DOWN_STOPPED" else
+        f"Stopped {scope.project_name} with resources remaining.",
+        tuple(lines),
+        None if code == "DOWN_STOPPED" else "Run 'devdock status' and retry 'devdock down'.",
+    )

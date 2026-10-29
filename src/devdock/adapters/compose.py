@@ -18,11 +18,11 @@ from devdock.adapters.base import (
     DaemonState,
     DeclaredServices,
     NetworkRecord,
+    OperationOutcome,
     PublishedPort,
     ResourceInventory,
     ServiceObservation,
     ServiceObservations,
-    StartOutcome,
 )
 
 VERSION_TIMEOUT = 5.0
@@ -30,6 +30,7 @@ DAEMON_TIMEOUT = 5.0
 CONFIG_TIMEOUT = 10.0
 LIST_TIMEOUT = 10.0
 START_TIMEOUT = 300.0
+STOP_TIMEOUT = 120.0
 
 PROJECT_LABEL = "com.docker.compose.project"
 _FIELD_SEPARATOR = "\t"
@@ -221,7 +222,7 @@ class ComposeAdapter:
         project_root: Path,
         compose_file: Path,
         timeout: float = START_TIMEOUT,
-    ) -> StartOutcome:
+    ) -> OperationOutcome:
         """Run ``docker compose up --detach`` for exactly this project.
 
         DevDock supplies the project name, project directory, and Compose file
@@ -234,29 +235,16 @@ class ComposeAdapter:
             raise ValueError(f"project name is not filter-safe: {project_name!r}")
         executable = self._locate("docker")
         if executable is None:
-            return StartOutcome("unavailable")
+            return OperationOutcome("unavailable")
         args = self._project_args(executable, project_name, project_root, compose_file)
         args += ["up", "--detach"]
-        try:
-            result = self._runner(args, cwd=project_root, timeout=timeout)
-        except subprocess.TimeoutExpired as expired:
-            return StartOutcome(
-                "timed_out",
-                raw_stdout=_captured(expired.stdout),
-                raw_stderr=_captured(expired.stderr),
-            )
-        except OSError:
-            return StartOutcome("unavailable")
-        return StartOutcome(
-            "started" if result.returncode == 0 else "failed",
-            returncode=result.returncode,
-            raw_stdout=result.stdout,
-            raw_stderr=result.stderr,
-        )
+        return self._run_operation(args, project_root, timeout)
 
     def _project_args(
         self, executable: str, project_name: str, project_root: Path, compose_file: Path
     ) -> list[str]:
+        """Common ``docker compose`` prefix; rejects names that are unsafe in filters."""
+
         if not _SAFE_PROJECT_NAME.fullmatch(project_name):
             raise ValueError(f"project name is not filter-safe: {project_name!r}")
         return [
@@ -269,6 +257,49 @@ class ComposeAdapter:
             "--project-name",
             project_name,
         ]
+
+    def stop(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float = STOP_TIMEOUT,
+    ) -> OperationOutcome:
+        """Run ``docker compose down`` for exactly this project.
+
+        Compose removes the project's containers and networks by default and
+        leaves volumes and images alone unless asked; DevDock never asks. It
+        also does not pass ``--remove-orphans``, so containers from services no
+        longer in the Compose file are reported, not removed.
+        """
+
+        executable = self._locate("docker")
+        if executable is None:
+            return OperationOutcome("unavailable")
+        args = self._project_args(executable, project_name, project_root, compose_file)
+        args += ["down"]
+        return self._run_operation(args, project_root, timeout)
+
+    def _run_operation(
+        self, args: list[str], project_root: Path, timeout: float
+    ) -> OperationOutcome:
+        try:
+            result = self._runner(args, cwd=project_root, timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            return OperationOutcome(
+                "timed_out",
+                raw_stdout=_captured(expired.stdout),
+                raw_stderr=_captured(expired.stderr),
+            )
+        except OSError:
+            return OperationOutcome("unavailable")
+        return OperationOutcome(
+            "succeeded" if result.returncode == 0 else "failed",
+            returncode=result.returncode,
+            raw_stdout=result.stdout,
+            raw_stderr=result.stderr,
+        )
 
     def list_declared_services(
         self, *, project_root: Path, compose_file: Path

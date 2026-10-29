@@ -6,14 +6,22 @@ from devdock.adapters import (
     ComposeCapabilities,
     ContainerRecord,
     DeclaredServices,
+    NetworkRecord,
+    OperationOutcome,
     PublishedPort,
     ResourceInventory,
     ServiceObservation,
     ServiceObservations,
-    StartOutcome,
 )
 from devdock.config import ProjectProfile
-from devdock.lifecycle import project_status, start_project
+from devdock.lifecycle import (
+    LifecycleResult,
+    StopPlan,
+    execute_stop,
+    plan_stop,
+    project_status,
+    start_project,
+)
 from devdock.ownership import derive_project_name, ownership_scope
 
 READY = ComposeCapabilities(
@@ -29,11 +37,11 @@ class FakeAdapter:
         *,
         capabilities: ComposeCapabilities = READY,
         inventory: ResourceInventory | None = None,
-        outcome: StartOutcome | None = None,
+        outcome: OperationOutcome | None = None,
     ) -> None:
         self._capabilities = capabilities
         self._inventory = inventory
-        self._outcome = outcome or StartOutcome("started", 0, "Container web Started", "")
+        self._outcome = outcome or OperationOutcome("succeeded", 0, "Container web Started", "")
         self.starts: list[dict[str, object]] = []
 
     def detect_capabilities(self) -> ComposeCapabilities:
@@ -49,7 +57,7 @@ class FakeAdapter:
 
     def start(
         self, *, project_name: str, project_root: Path, compose_file: Path, timeout: float
-    ) -> StartOutcome:
+    ) -> OperationOutcome:
         self.starts.append(
             {
                 "project_name": project_name,
@@ -237,7 +245,7 @@ def test_incomplete_inventory_blocks_the_start(tmp_path: Path) -> None:
 
 def test_failed_start_summarizes_stderr_and_redacts_it(tmp_path: Path) -> None:
     adapter = FakeAdapter(
-        outcome=StartOutcome("failed", 1, "", "bind failed for hunter2-very-secret")
+        outcome=OperationOutcome("failed", 1, "", "bind failed for hunter2-very-secret")
     )
 
     result = start_project(
@@ -254,7 +262,7 @@ def test_failed_start_summarizes_stderr_and_redacts_it(tmp_path: Path) -> None:
 
 
 def test_timeout_warns_that_containers_may_exist(tmp_path: Path) -> None:
-    adapter = FakeAdapter(outcome=StartOutcome("timed_out", None, "pulling", ""))
+    adapter = FakeAdapter(outcome=OperationOutcome("timed_out", None, "pulling", ""))
 
     result = start_project(
         profile(), make_project(tmp_path), adapter=adapter, environ={}, timeout=5
@@ -266,7 +274,7 @@ def test_timeout_warns_that_containers_may_exist(tmp_path: Path) -> None:
 
 
 def test_unavailable_runtime_during_start_is_reported(tmp_path: Path) -> None:
-    adapter = FakeAdapter(outcome=StartOutcome("unavailable"))
+    adapter = FakeAdapter(outcome=OperationOutcome("unavailable"))
 
     result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
@@ -278,7 +286,7 @@ def test_unavailable_runtime_during_start_is_reported(tmp_path: Path) -> None:
 
 def test_default_output_is_a_bounded_tail(tmp_path: Path) -> None:
     noisy = "\n".join(f"line {index}" for index in range(60))
-    adapter = FakeAdapter(outcome=StartOutcome("failed", 1, "", noisy))
+    adapter = FakeAdapter(outcome=OperationOutcome("failed", 1, "", noisy))
 
     result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
@@ -288,7 +296,7 @@ def test_default_output_is_a_bounded_tail(tmp_path: Path) -> None:
 
 def test_show_output_includes_both_streams_and_still_redacts(tmp_path: Path) -> None:
     adapter = FakeAdapter(
-        outcome=StartOutcome("started", 0, "pulled image-layer-token", "warning text")
+        outcome=OperationOutcome("succeeded", 0, "pulled image-layer-token", "warning text")
     )
 
     result = start_project(
@@ -306,7 +314,7 @@ def test_show_output_includes_both_streams_and_still_redacts(tmp_path: Path) -> 
 
 
 def test_show_output_cannot_be_used_to_disable_redaction(tmp_path: Path) -> None:
-    adapter = FakeAdapter(outcome=StartOutcome("failed", 1, "", "secret-value-here"))
+    adapter = FakeAdapter(outcome=OperationOutcome("failed", 1, "", "secret-value-here"))
 
     shown = start_project(
         profile(),
@@ -459,3 +467,221 @@ def test_status_needs_a_responsive_runtime(
     result = project_status(profile(), make_project(tmp_path), adapter=adapter)
 
     assert result.code == expected and adapter.observe_calls == []
+
+
+# --- down -------------------------------------------------------------------
+
+
+class StopAdapter(StatusAdapter):
+    """StatusAdapter plus a scripted stop and a second inventory for the post-check."""
+
+    def __init__(
+        self,
+        *,
+        stop_outcome: OperationOutcome | None = None,
+        after: ResourceInventory | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._stop_outcome = stop_outcome or OperationOutcome("succeeded", 0, "Removed", "")
+        self._after = after
+        self.stops: list[dict[str, object]] = []
+        self._inventory_calls = 0
+
+    def list_project_resources(self, project_name: str) -> ResourceInventory:
+        self._inventory_calls += 1
+        if self._inventory_calls > 1 and self._after is not None:
+            return self._after
+        return super().list_project_resources(project_name)
+
+    def stop(
+        self, *, project_name: str, project_root: Path, compose_file: Path, timeout: float
+    ) -> OperationOutcome:
+        self.stops.append({"project_name": project_name, "timeout": timeout})
+        return self._stop_outcome
+
+
+def running_project(tmp_path: Path):  # type: ignore[no-untyped-def]
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    web = managed(scope, f"{scope.project_name}-web-1", "web")
+    db = managed(scope, f"{scope.project_name}-db-1", "db", state="exited")
+    old = managed(scope, f"{scope.project_name}-legacy-1", "legacy")
+    inventory = ResourceInventory(
+        scope.project_name,
+        containers=(web, db, old),
+        networks=(NetworkRecord("n1", f"{scope.project_name}_default"),),
+        volumes=(f"{scope.project_name}_pgdata",),
+    )
+    return root, scope, inventory
+
+
+def test_plan_lists_affected_remaining_networks_and_preserved_volumes(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory)
+
+    plan = plan_stop(profile(), root, adapter=adapter)
+
+    assert isinstance(plan, StopPlan)
+    assert [item.service for item in plan.affected] == ["web", "db"]
+    assert [item.service for item in plan.remaining] == ["legacy"]
+    text = "\n".join(plan.explain())
+    assert "Will stop and remove 2 container(s)" in text
+    assert "Will remove 1 project network(s)" in text
+    assert "no longer declared" in text and "legacy" in text
+    assert "Will preserve 1 volume(s)" in text and "_pgdata" in text
+    assert adapter.stops == []
+
+
+def test_plan_does_not_require_profile_checks_to_pass(tmp_path: Path) -> None:
+    root, _scope, inventory = running_project(tmp_path)
+
+    plan = plan_stop(
+        profile(required_env=["ABSENT_VARIABLE"]), root, adapter=StopAdapter(inventory=inventory)
+    )
+
+    assert isinstance(plan, StopPlan)
+
+
+def test_plan_refuses_on_ownership_conflict(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    squatter = ContainerRecord(id="q", name=f"{scope.project_name}-web-1", state="running")
+
+    plan = plan_stop(
+        profile(),
+        root,
+        adapter=StopAdapter(
+            inventory=ResourceInventory(scope.project_name, containers=(squatter,))
+        ),
+    )
+
+    assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_OWNERSHIP_CONFLICT"
+
+
+def test_plan_refuses_when_inventory_is_incomplete(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+
+    plan = plan_stop(
+        profile(),
+        root,
+        adapter=StopAdapter(inventory=ResourceInventory(scope.project_name, errors=("boom",))),
+    )
+
+    assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_OWNERSHIP_CONFLICT"
+
+
+def test_plan_refuses_when_declared_services_cannot_be_listed(tmp_path: Path) -> None:
+    root, _scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory, declared=DeclaredServices(error="exit code 1"))
+
+    plan = plan_stop(profile(), root, adapter=adapter)
+
+    assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_CONFIG_UNREADABLE"
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        (ComposeCapabilities(executable=None, compose_cli="missing"), "DOWN_RUNTIME_UNAVAILABLE"),
+        (
+            ComposeCapabilities(executable="docker", compose_cli="available", daemon="unavailable"),
+            "DOWN_DAEMON_UNAVAILABLE",
+        ),
+    ],
+)
+def test_plan_needs_a_responsive_runtime(
+    tmp_path: Path, capabilities: ComposeCapabilities, expected: str
+) -> None:
+    adapter = StopAdapter(capabilities=capabilities)
+    plan = plan_stop(profile(), make_project(tmp_path), adapter=adapter)
+
+    assert isinstance(plan, LifecycleResult) and plan.code == expected
+
+
+def test_plan_requires_a_compose_file(tmp_path: Path) -> None:
+    plan = plan_stop(profile(), tmp_path, adapter=StopAdapter())
+
+    assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_COMPOSE_FILE_MISSING"
+
+
+def test_execute_stops_then_verifies_and_reports_preserved_volumes(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    after = ResourceInventory(
+        scope.project_name,
+        containers=(inventory.containers[2],),  # legacy stays
+        volumes=inventory.volumes,
+    )
+    adapter = StopAdapter(inventory=inventory, after=after)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    result = execute_stop(plan, adapter=adapter, environ={}, timeout=33)
+    text = "\n".join(result.lines)
+
+    assert result.ok and result.code == "DOWN_STOPPED"
+    assert adapter.stops == [{"project_name": scope.project_name, "timeout": 33}]
+    assert "Preserved 1 volume(s)" in text and "_pgdata" in text
+    assert "Left in place as planned: 1 container(s)" in text
+    assert "Warning" not in text
+
+
+def test_execute_reports_partial_when_resources_survive(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory, after=inventory)  # nothing changed
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+    text = "\n".join(result.lines)
+
+    assert not result.ok and result.code == "DOWN_PARTIAL"
+    assert "2 container(s) still exist" in text
+    assert "network(s) still exist" in text
+
+
+def test_execute_with_nothing_to_do_is_idempotent_and_runs_no_command(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = StopAdapter(
+        inventory=ResourceInventory(scope.project_name, volumes=(f"{scope.project_name}_data",))
+    )
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan) and plan.nothing_to_do
+
+    first = execute_stop(plan, adapter=adapter, environ={})
+    second = execute_stop(plan, adapter=adapter, environ={})
+
+    assert first.ok and first.code == "DOWN_NOTHING_TO_STOP"
+    assert second.code == first.code
+    assert adapter.stops == []
+    assert any("Will preserve 1 volume(s)" in line for line in first.lines)
+
+
+def test_execute_redacts_runtime_output_on_failure(tmp_path: Path) -> None:
+    root, _scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(
+        inventory=inventory,
+        stop_outcome=OperationOutcome("failed", 1, "", "cannot remove hunter2-very-secret"),
+    )
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    result = execute_stop(plan, adapter=adapter, environ={"PW": "hunter2-very-secret"})
+    text = "\n".join(result.lines)
+
+    assert result.code == "DOWN_FAILED" and "exit code 1" in result.summary
+    assert "hunter2-very-secret" not in text and "${PW}" in text
+
+
+def test_execute_timeout_says_state_may_be_partial(tmp_path: Path) -> None:
+    root, _scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory, stop_outcome=OperationOutcome("timed_out"))
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    result = execute_stop(plan, adapter=adapter, environ={}, timeout=7)
+
+    assert result.code == "DOWN_TIMED_OUT" and "7 seconds" in result.summary
+    assert any("may already be stopped" in line for line in result.lines)

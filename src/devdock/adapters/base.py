@@ -128,28 +128,28 @@ class ResourceInventory:
     errors: tuple[str, ...] = ()
 
 
-StartStatus = Literal["started", "failed", "timed_out", "unavailable"]
+OperationStatus = Literal["succeeded", "failed", "timed_out", "unavailable"]
 
 
 @dataclass(frozen=True)
-class StartOutcome:
-    """Result of a start attempt, including raw captured output.
+class OperationOutcome:
+    """Result of a mutating operation (start or stop), including raw captured output.
 
     Unlike the inspect-side result types, this one deliberately carries the
-    runtime's raw stdout and stderr, because a failed start is not actionable
-    without them. The fields are named ``raw_`` as a warning: they may contain
-    interpolated configuration values and must pass through
+    runtime's raw stdout and stderr, because a failed operation is not
+    actionable without them. The fields are named ``raw_`` as a warning: they
+    may contain interpolated configuration values and must pass through
     ``devdock.redaction`` before being displayed.
     """
 
-    status: StartStatus
+    status: OperationStatus
     returncode: int | None = None
     raw_stdout: str = ""
     raw_stderr: str = ""
 
     @property
-    def started(self) -> bool:
-        return self.status == "started"
+    def succeeded(self) -> bool:
+        return self.status == "succeeded"
 
 
 @dataclass(frozen=True)
@@ -223,8 +223,19 @@ class RuntimeAdapter(Protocol):
         project_root: Path,
         compose_file: Path,
         timeout: float,
-    ) -> StartOutcome:
+    ) -> OperationOutcome:
         """Start the project's services detached, without waiting for readiness."""
+        ...
+
+    def stop(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float,
+    ) -> OperationOutcome:
+        """Stop and remove the project's containers and networks; never volumes or images."""
         ...
 
     def list_declared_services(

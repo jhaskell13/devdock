@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 import devdock.adapters.compose as compose
 import devdock.cli as cli
 from devdock.cli import app
-from devdock.lifecycle import LifecycleResult
+from devdock.lifecycle import LifecycleResult, StopPlan
 
 runner = CliRunner()
 
@@ -206,3 +206,126 @@ def test_status_without_compose_file_exits_non_zero(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "STATUS_COMPOSE_FILE_MISSING" in result.stderr
+
+
+def _ready_project(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+
+def _fake_plan(tmp_path: Path, *, empty: bool = False) -> StopPlan:
+    from devdock.adapters import ContainerRecord, ResourceInventory
+    from devdock.config import ProjectProfile
+    from devdock.ownership import assess_ownership, ownership_scope
+
+    scope = ownership_scope(ProjectProfile(schema_version=1, project="sample"), tmp_path)
+    containers = () if empty else (
+        ContainerRecord(
+            "c1", f"{scope.project_name}-web-1", "running", scope.project_name,
+            str(scope.root), str(scope.compose_file), "web", "False",
+        ),
+    )
+    inventory = ResourceInventory(scope.project_name, containers=containers)
+    assessment = assess_ownership(scope, inventory)
+    return StopPlan(scope, assessment, assessment.managed, (), (), ())
+
+
+def test_down_dry_run_prints_the_plan_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Will stop and remove 1 container(s)" in result.stdout
+    assert "DOWN_DRY_RUN" in result.stdout
+
+
+def test_down_without_a_terminal_requires_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+    result = runner.invoke(app, ["down", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "DOWN_CONFIRMATION_REQUIRED" in result.stderr
+    assert "Will stop and remove 1 container(s)" in result.stdout  # preview still shown
+
+
+def test_down_with_yes_executes_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    executed: list[StopPlan] = []
+
+    def fake_execute(plan: StopPlan, **_kwargs: object) -> LifecycleResult:
+        executed.append(plan)
+        return LifecycleResult("DOWN_STOPPED", True, "Stopped.", ())
+
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", fake_execute)
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 0 and len(executed) == 1
+    assert "[OK] DOWN_STOPPED" in result.stdout
+
+
+def test_down_interactive_decline_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+
+    result = runner.invoke(app, ["down", str(tmp_path)], input="n\n")
+
+    assert result.exit_code == 1
+    assert "DOWN_CANCELLED" in result.stderr
+
+
+def test_down_interactive_accept_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(
+        cli, "execute_stop", lambda *_a, **_k: LifecycleResult("DOWN_STOPPED", True, "Stopped.", ())
+    )
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+
+    result = runner.invoke(app, ["down", str(tmp_path)], input="y\n")
+
+    assert result.exit_code == 0 and "[OK] DOWN_STOPPED" in result.stdout
+
+
+def test_down_with_nothing_to_do_needs_no_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path, empty=True))
+    monkeypatch.setattr(
+        cli,
+        "execute_stop",
+        lambda *_a, **_k: LifecycleResult("DOWN_NOTHING_TO_STOP", True, "Nothing.", ()),
+    )
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+    result = runner.invoke(app, ["down", str(tmp_path)])
+
+    assert result.exit_code == 0 and "DOWN_NOTHING_TO_STOP" in result.stdout
+
+
+def test_down_refusal_from_planning_is_rendered(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 1
+    assert "DOWN_COMPOSE_FILE_MISSING" in result.stderr

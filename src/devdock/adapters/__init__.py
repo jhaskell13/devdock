@@ -8,12 +8,12 @@ from devdock.adapters.base import (
     ContainerRecord,
     DeclaredServices,
     NetworkRecord,
+    OperationOutcome,
     PublishedPort,
     ResourceInventory,
     RuntimeAdapter,
     ServiceObservation,
     ServiceObservations,
-    StartOutcome,
 )
 from devdock.adapters.compose import ComposeAdapter, run_command
 
@@ -31,6 +31,6 @@ __all__ = [
     "RuntimeAdapter",
     "ServiceObservation",
     "ServiceObservations",
-    "StartOutcome",
+    "OperationOutcome",
     "run_command",
 ]

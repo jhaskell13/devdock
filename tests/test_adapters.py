@@ -264,7 +264,7 @@ def test_start_uses_devdock_controlled_options_only(tmp_path: Path) -> None:
         timeout=30,
     )
 
-    assert outcome.started and outcome.returncode == 0
+    assert outcome.succeeded and outcome.returncode == 0
     args, cwd, timeout = runner.calls[0]
     assert args == [
         "docker", "compose",
@@ -479,3 +479,78 @@ def test_observe_services_tolerates_missing_health_exit_code_and_publishers(
 
     assert item.state == "exited" and item.health == "" and item.exit_code is None
     assert item.ports == ()
+
+
+# --- stop -------------------------------------------------------------------
+
+
+def test_stop_runs_plain_compose_down_scoped_to_the_project(tmp_path: Path) -> None:
+    runner = RecordingRunner([OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+    compose_file = tmp_path / "compose.yaml"
+
+    outcome = adapter.stop(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=compose_file,
+        timeout=60,
+    )
+
+    assert outcome.succeeded
+    args, cwd, timeout = runner.calls[0]
+    assert args == [
+        "docker", "compose",
+        "--project-directory", str(tmp_path),
+        "--file", str(compose_file),
+        "--project-name", "devdock-s-0123456789ab",
+        "down",
+    ]
+    assert cwd == tmp_path and timeout == 60
+
+
+def test_stop_never_removes_volumes_images_or_orphans(tmp_path: Path) -> None:
+    runner = RecordingRunner([OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    adapter.stop(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=60,
+    )
+
+    args = runner.calls[0][0]
+    for forbidden in ("--volumes", "-v", "--rmi", "--remove-orphans"):
+        assert forbidden not in args
+
+
+def test_stop_reports_failure_timeout_and_unavailability(tmp_path: Path) -> None:
+    def stop_with(payload: CommandResult | BaseException, locate: str | None = "docker"):  # type: ignore[no-untyped-def]
+        return ComposeAdapter(RecordingRunner([payload]), locate=lambda _: locate).stop(
+            project_name="devdock-s-0123456789ab",
+            project_root=tmp_path,
+            compose_file=tmp_path / "compose.yaml",
+            timeout=5,
+        )
+
+    failed = stop_with(CommandResult(1, "", "network in use"))
+    timed_out = stop_with(subprocess.TimeoutExpired(["docker"], 5, output=b"stopping"))
+    unavailable = stop_with(OK, locate=None)
+
+    assert failed.status == "failed" and failed.raw_stderr == "network in use"
+    assert timed_out.status == "timed_out" and timed_out.raw_stdout == "stopping"
+    assert unavailable.status == "unavailable"
+
+
+def test_stop_rejects_an_unsafe_project_name(tmp_path: Path) -> None:
+    runner = RecordingRunner([])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    with pytest.raises(ValueError):
+        adapter.stop(
+            project_name="Bad Name",
+            project_root=tmp_path,
+            compose_file=tmp_path / "compose.yaml",
+            timeout=5,
+        )
+    assert runner.calls == []

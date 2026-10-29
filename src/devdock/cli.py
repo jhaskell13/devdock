@@ -1,21 +1,28 @@
 """DevDock command-line interface."""
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from devdock.adapters.compose import START_TIMEOUT
+from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
 from devdock.config import ProfileError, ProjectProfile, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
-from devdock.lifecycle import LifecycleResult, project_status, start_project
+from devdock.lifecycle import (
+    LifecycleResult,
+    execute_stop,
+    plan_stop,
+    project_status,
+    start_project,
+)
 from devdock.metadata import read_python_metadata
 from devdock.ownership import ownership_scope
 
 app = typer.Typer(
     name="devdock",
-    help="Inspect and check local development environments.",
+    help="Inspect, check, start, and stop local development environments.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -113,6 +120,12 @@ def _load_project(directory: Path) -> tuple[Path, ProjectProfile]:
         raise typer.Exit(code=1) from exc
 
 
+def _interactive() -> bool:
+    """Whether a person can answer a confirmation prompt on this standard input."""
+
+    return sys.stdin.isatty()
+
+
 def _render(result: LifecycleResult) -> None:
     """Print a lifecycle result and exit non-zero when it did not succeed."""
 
@@ -147,6 +160,53 @@ def up(
             profile, root, timeout=timeout, show_output=show_output
         )
     )
+
+
+@app.command()
+def down(
+    directory: Annotated[Path, typer.Argument(help="Project directory to stop.")] = Path("."),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would change and exit without acting.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Proceed without an interactive confirmation.")
+    ] = False,
+    show_output: Annotated[
+        bool,
+        typer.Option("--show-output", help="Show the runtime's full output, still redacted."),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=1.0, help="Seconds to allow the stop to run."),
+    ] = STOP_TIMEOUT,
+) -> None:
+    """Stop and remove the project's containers and networks. Volumes are never removed."""
+
+    root, profile = _load_project(directory)
+    plan = plan_stop(profile, root)
+    if isinstance(plan, LifecycleResult):
+        _render(plan)
+        return
+    for line in plan.explain():
+        typer.echo(line)
+    if dry_run:
+        typer.echo("[OK] DOWN_DRY_RUN: Nothing was changed.")
+        return
+    if plan.nothing_to_do:
+        _render(execute_stop(plan, timeout=timeout, show_output=show_output))
+        return
+    if not yes:
+        if not _interactive():
+            typer.echo(
+                "[REFUSED] DOWN_CONFIRMATION_REQUIRED: Not an interactive terminal; "
+                "pass --yes to proceed or --dry-run to preview.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if not typer.confirm("Stop and remove the resources listed above?", default=False):
+            typer.echo("[REFUSED] DOWN_CANCELLED: No changes were made.", err=True)
+            raise typer.Exit(code=1)
+    _render(execute_stop(plan, timeout=timeout, show_output=show_output))
 
 
 @app.command()

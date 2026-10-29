@@ -9,6 +9,7 @@ This page describes behavior currently implemented by DevDock. Options may be ad
 | `devdock init [DIRECTORY]` | `.` | Creates the directory if needed, then writes a starter `devdock.yaml`. Refuses to overwrite an existing profile. |
 | `devdock inspect [DIRECTORY]` | `.` | Finds the nearest project root and reports the profile and common Compose files. If a profile exists, validates it and reports the configured project, runtimes, and the Compose project name DevDock will manage. |
 | `devdock up [DIRECTORY]` | `.` | Runs the profile's checks, proves ownership, then starts the project's Compose services detached. Refuses before any mutation if a check fails, the Compose file is missing or escapes the project, Docker is unavailable, or any resource under the project name is not DevDock's. |
+| `devdock down [DIRECTORY]` | `.` | Previews then stops and removes the project's DevDock-managed containers and networks. Volumes are never removed. Requires confirmation, `--yes`, or `--dry-run`. |
 | `devdock status [DIRECTORY]` | `.` | Reports each declared service's container, state, Compose health, readiness class, and published ports. Read-only; ownership conflicts are listed, not treated as a refusal. |
 | `devdock check [DIRECTORY]` | `.` | Finds the nearest project root, requires `devdock.yaml`, validates it, then runs the checks declared by that profile. |
 | `devdock --help` | — | Lists commands and options. Each command also accepts `--help`. |
@@ -41,6 +42,7 @@ Unknown fields are errors. The schema does not load `.env`, expand variables, ex
 - `init` prints the created profile path to standard output and exits `0`. If the profile already exists, it writes an error to standard error and exits `1` without replacing the file.
 - `inspect` prints the selected root and discovered files to standard output. Invalid profile data is reported on standard error and exits `1`; otherwise it exits `0`.
 - `up` prints its result as `[OK]` or `[REFUSED]` with a stable code, the ownership preview, and any redacted runtime output. Successful runs go to standard output and exit `0`; refusals and failures go to standard error and exit `1`.
+- `down` prints the plan on standard output, then `[OK] DOWN_STOPPED`, `DOWN_NOTHING_TO_STOP`, or `DOWN_DRY_RUN` with exit `0`; refusals, cancellation, `DOWN_PARTIAL`, and failures go to standard error with exit `1`.
 - `status` prints `[OK] STATUS_REPORTED` followed by the table on standard output and exits `0`, or `STATUS_INCOMPLETE`/a refusal code on standard error with exit `1`.
 - `check` prints each finding to standard output as `[PASS]`, `[WARN]`, `[SKIP]`, or `[FAIL]` followed by a stable code and summary, then optional evidence and a suggested action. Warnings and skipped checks do not fail the command. It exits `0` if there are no failed findings and `1` if the profile is missing/invalid or any check fails.
 - Typer handles command-line syntax and argument errors; those use its parser exit behavior.
@@ -75,6 +77,21 @@ Captured Docker output is hidden by default. On failure DevDock prints the last 
 Both paths are redacted and `--show-output` does not disable redaction. Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, and passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`.
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env` file, which DevDock never opens, so a value that exists only there cannot be recognized and could appear in output. Treat `--show-output` as a deliberate disclosure and review what you paste elsewhere.
+
+## Stopping services
+
+`devdock down` is the only destructive command. It always prints a plan first:
+
+- containers it will stop and remove, by name, service, and state;
+- project networks it will remove;
+- DevDock containers it will leave in place because their service is no longer declared in the current Compose file;
+- volumes it will preserve. No DevDock command removes volumes in this version; that is later roadmap work with its own authorization design.
+
+The plan is built from the same gates as `up` except the profile's diagnostics, which are deliberately skipped so a project can be torn down even when, say, a required environment variable is unset. Any ownership conflict, incomplete inventory, or unreadable Compose file refuses before the plan is shown.
+
+Then one of three things happens. `--dry-run` prints `DOWN_DRY_RUN` and exits `0` without changing anything. Otherwise, if there is nothing to stop, DevDock reports `DOWN_NOTHING_TO_STOP` and runs no command; repeating `down` is safe. If there is work to do, DevDock asks for confirmation on an interactive terminal, or requires `--yes` when standard input is not a terminal, and refuses with `DOWN_CONFIRMATION_REQUIRED` otherwise. Declining prints `DOWN_CANCELLED` and exits `1` with nothing changed.
+
+The command run is `docker compose --project-directory <root> --file <compose file> --project-name <derived name> down`, with no `--volumes`, `--rmi`, or `--remove-orphans`. After it returns DevDock re-inventories the project: `DOWN_STOPPED` means no planned container or network survived; `DOWN_PARTIAL` lists what remains and exits `1`. A timeout reports that some resources may already be gone and points at `devdock status`. Runtime output is handled exactly as for `up`.
 
 ## Reporting status
 
@@ -121,7 +138,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
-| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `STATUS_DAEMON_UNAVAILABLE` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
+| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `DOWN_STOPPED`, `DOWN_PARTIAL`, `DOWN_CONFIRMATION_REQUIRED`, `DOWN_OWNERSHIP_CONFLICT` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
 | Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
 
 Codes are illustrative and not exhaustive; the `code` field in source is authoritative. Existing codes should not be repurposed for different failure meanings.

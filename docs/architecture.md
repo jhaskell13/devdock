@@ -10,7 +10,8 @@ Typer commands
   ├─ inspect   discovers the project root and reports known files
   ├─ check     loads the profile, validates it, and runs diagnostics
   ├─ up        gates on checks and ownership, then starts services detached
-  └─ status    joins declared services, owned containers, and runtime state
+  ├─ status    joins declared services, owned containers, and runtime state
+  └─ down      plans, confirms, stops containers and networks, verifies; never volumes
 
 Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
@@ -22,6 +23,7 @@ Runtime adapter (adapters/)
 
 Lifecycle (lifecycle.py)
   ├─ policy only: every gate runs before the adapter is asked to mutate
+  ├─ down is split into plan_stop (preview) and execute_stop (act, then re-verify)
   └─ returns redacted display lines and a stable code
 
 Status (status.py)
