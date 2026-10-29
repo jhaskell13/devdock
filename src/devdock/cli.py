@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+import yaml
 
 from devdock import __version__
 from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
@@ -66,15 +67,18 @@ def init(
         _echo(f"Could not create project directory {root}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     profile_path = root / CONFIG_NAME
-    starter_profile = "\n".join(
-        (
-            "schema_version: 1",
-            f"project: {root.name or 'my-project'}",
-            "runtimes: {}",
-            "compose_file: null",
-            "required_env: []",
-            "",
-        )
+    # Serialized rather than templated: a directory named "true", "1.0", or
+    # "a: b" would otherwise produce a profile whose project is not a string.
+    starter_profile = yaml.safe_dump(
+        {
+            "schema_version": 1,
+            "project": root.name or "my-project",
+            "runtimes": {},
+            "compose_file": None,
+            "required_env": [],
+        },
+        sort_keys=False,
+        allow_unicode=True,
     )
     try:
         with profile_path.open("x", encoding="utf-8") as profile_file:

@@ -110,7 +110,7 @@ class ProjectStatus:
         return tally
 
     def explain(self) -> tuple[str, ...]:
-        lines = list(self.scope.describe()[:3])
+        lines = list(self.scope.describe(boundary=False))
         if self.services:
             lines.extend(_table(self.services))
         else:

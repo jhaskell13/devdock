@@ -347,3 +347,18 @@ def test_output_neutralizes_control_characters_from_runtime_data(
     assert "\x1b" not in result.stdout and "\x07" not in result.stdout
     assert "\r" not in result.stdout
     assert "web?[2J?[H? hidden??fake [OK] line" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["true", "null", "1.0", "0o17", "a: b", "needs #quoting", "yes"])
+def test_init_produces_a_valid_profile_for_yaml_hostile_directory_names(
+    tmp_path: Path, name: str
+) -> None:
+    """A directory called "true" must not become a boolean project name."""
+    target = tmp_path / name
+
+    created = runner.invoke(app, ["init", str(target)])
+    checked = runner.invoke(app, ["check", str(target)])
+
+    assert created.exit_code == 0, created.stderr
+    assert checked.exit_code == 0, checked.stdout + checked.stderr
+    assert f"Profile is valid for {name}" in checked.stdout

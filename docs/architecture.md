@@ -1,6 +1,6 @@
 # Initial architecture
 
-DevDock starts as a Python CLI for inspecting and checking one local project. The first increment keeps commands read-only except for `init`, which creates the target directory when needed and writes a profile file.
+DevDock is a Python CLI for inspecting, checking, starting, and stopping one local project's Docker Compose services. `inspect`, `check`, and `status` are read-only. `init` writes one profile file. `up` and `down` mutate only Compose resources DevDock can prove it created, after printing what they will touch.
 
 ## Runtime flow
 
@@ -62,7 +62,7 @@ The root YAML object has these fields:
 - `schema_version`: required integer, currently `1`.
 - `project`: required non-empty project name.
 - `runtimes`: optional mapping of runtime identifiers to requirements. The first checks support `python: ">=X.Y"` and `docker: "compose"`.
-- `compose_file`: optional project-relative Compose file path. Absolute paths, drive-qualified paths, backslashes, and lexical `..` traversal are rejected. Symlink-aware containment remains future work before this path is used for mutations.
+- `compose_file`: optional project-relative Compose file path. Absolute paths, drive-qualified paths, backslashes, and lexical `..` traversal are rejected. `check`, `up`, `status`, and `down` all verify that the resolved path stays inside the project before it is used.
 - `required_env`: optional list of environment variable names. DevDock checks whether each name is set in its process environment and never prints values.
 - `required_files` and `required_dirs`: optional project-relative filesystem paths. Lexical traversal and resolved symlinks outside the project are rejected by checks.
 - `ports`: optional distinct TCP ports to probe on loopback; results are momentary observations.
@@ -75,7 +75,7 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 
 ## Adapter boundary
 
-All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns `ComposeCapabilities` and `ConfigValidation` values that contain exit status and executable paths but no captured output. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. Lifecycle methods (start, status, stop, resource identification) are added to the protocol by the milestone that implements them, so the contract never advertises unimplemented behavior. `ownership.py` holds the pure rules for what DevDock owns: the derived project name and the label values Compose writes when DevDock runs it with an absolute `--project-directory` and `-f`. The adapter's inventory returns only identity fields and those labels, each JSON-encoded in the template so untrusted values cannot break the line format. Every Compose invocation receives a pinned environment (`HARDENED_ENVIRONMENT`) so project `.env` settings cannot change what a command removes. Lifecycle commands print the assessment before acting and refuse when any resource under the name is not provably theirs. Destructive cleanup and volume removal require a separate preview/authorization design.
+All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns status-only values (`ComposeCapabilities`, `ConfigValidation`, `ResourceInventory`, `ServiceObservations`) for everything inspect-side. The one exception is `OperationOutcome` from `start` and `stop`, which carries raw output in fields named `raw_` because a failed operation is not actionable without it; `lifecycle.py` is its only consumer and always passes it through `redaction` first. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. `ownership.py` holds the pure rules for what DevDock owns: the derived project name and the label values Compose writes when DevDock runs it with an absolute `--project-directory` and `-f`. The adapter's inventory returns only identity fields and those labels, each JSON-encoded in the template so untrusted values cannot break the line format. Every Compose invocation receives a pinned environment (`HARDENED_ENVIRONMENT`) so project `.env` settings cannot change what a command removes. Lifecycle commands print the assessment before acting and refuse when any resource under the name is not provably theirs. Destructive cleanup and volume removal require a separate preview/authorization design.
 
 SQLite is deferred until the product needs durable snapshots or recovery state. The first milestone has no daemon, web UI, cloud connection, credential store, or AI features.
 

@@ -220,7 +220,7 @@ def _check_compose(
                 "DOCKER_DAEMON_AVAILABLE",
                 "PASS",
                 "Docker daemon is reachable.",
-                evidence=("Docker info request succeeded.",),
+                evidence=("Docker version request returned a server version.",),
             )
         )
     elif capabilities.daemon == "permission_denied":

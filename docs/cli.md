@@ -9,7 +9,7 @@ This page describes behavior currently implemented by DevDock. Options may be ad
 | `devdock init [DIRECTORY]` | `.` | Creates the directory if needed, then writes a starter `devdock.yaml`. Refuses to overwrite an existing profile. |
 | `devdock inspect [DIRECTORY]` | `.` | Finds the nearest project root and reports the profile and common Compose files. If a profile exists, validates it and reports the configured project, runtimes, and the Compose project name DevDock will manage. |
 | `devdock up [DIRECTORY]` | `.` | Runs the profile's checks, proves ownership, then starts the project's Compose services detached. Refuses before any mutation if a check fails, the Compose file is missing or escapes the project, Docker is unavailable, or any resource under the project name is not DevDock's. |
-| `devdock down [DIRECTORY]` | `.` | Previews then stops and removes the project's DevDock-managed containers and networks. Volumes are never removed. Requires confirmation, `--yes`, or `--dry-run`. |
+| `devdock down [DIRECTORY]` | `.` | Previews then stops and removes the project's DevDock-managed containers and networks. Volumes are never removed. Requires confirmation or `--yes` when there is something to stop; `--dry-run` previews only. |
 | `devdock status [DIRECTORY]` | `.` | Reports each declared service's container, state, Compose health, readiness class, and published ports. Read-only; ownership conflicts are listed, not treated as a refusal. |
 | `devdock check [DIRECTORY]` | `.` | Finds the nearest project root, requires `devdock.yaml`, validates it, then runs the checks declared by that profile. |
 | `devdock --help` | — | Lists commands and options. Each command also accepts `--help`. |
@@ -62,7 +62,7 @@ The output is intended for people. There is no machine-readable output format ye
 3. The Docker Compose CLI must respond and the daemon must be reachable.
 4. The ownership assessment must be clean. Conflicts and incomplete inventories both refuse.
 
-DevDock then runs `docker compose --project-directory <root> --file <compose file> --project-name <derived name> up --detach`. It supplies those options itself and forwards no user-provided Compose options in this version. It does not pass `--wait`, `--remove-orphans`, or `--force-recreate`.
+DevDock then runs `docker compose --project-directory <root> --file <compose file> --project-name <derived name> up --detach`. It supplies those options itself and forwards no user-provided Compose options in this version. It passes `--remove-orphans=false` explicitly, so a project `.env` cannot turn orphan removal on, and never passes `--wait` or `--force-recreate`.
 
 `up` returns when Compose has created and started the containers. That is not the same as ready: a container can be running while the service inside it is still starting. DevDock says so on success and does not poll for health. Readiness and dependency ordering are Milestone 3.
 
@@ -95,7 +95,7 @@ Every result states the runtime's exit code and whether the message was recogniz
 
 On success, captured Docker output is not shown: DevDock has already described what changed in its own words, and the runtime's progress text adds only disclosure risk. When a failure is *recognized*, its output is withheld for the same reason: the code and suggested action already say what to do, and showing the text would risk disclosing values DevDock cannot recognize for no diagnostic gain. When a failure is *unrecognized*, DevDock prints the last 20 meaningful lines after redaction, because that is the only information available. `--show-output` prints all of both streams in either case, also redacted. `--show-output` controls volume, never redaction.
 
-Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, except a short list of well-known non-secret variables such as `PATH`, `TERM`, `LANG`, and `LC_*`; `HOME` and `USER` are treated as private and redacted. Passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`. Values are matched in one pass, longest first, so a short value cannot rewrite another value's placeholder.
+Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, except a short list of well-known non-secret variables such as `PATH`, `TERM`, `LANG`, and `LC_*`; `HOME` and `USER` are treated as private and redacted, so paths under your home directory appear as `${HOME}/...` in shown output; that is deliberate, since the paths identify the machine and user. Passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`. Values are matched in one pass, longest first, so a short value cannot rewrite another value's placeholder.
 
 A second layer matches credentials by shape rather than by value, so it catches secrets DevDock has never seen — including values Compose read from the project's `.env`. It covers private key blocks, JWTs, AWS key IDs, GitHub and Slack tokens, `sk-` style API keys, `Bearer` headers, and `key=value` pairs whose key names a secret such as `POSTGRES_PASSWORD` or `api_key`. The key is kept and the value replaced, so the message still explains what went wrong.
 
@@ -116,7 +116,9 @@ The plan is built from the same gates as `up` except the profile's diagnostics, 
 
 Then one of three things happens. `--dry-run` prints `DOWN_DRY_RUN` and exits `0` without changing anything. Otherwise, if there is nothing to stop, DevDock reports `DOWN_NOTHING_TO_STOP` and runs no command; repeating `down` is safe. If there is work to do, DevDock asks for confirmation on an interactive terminal, or requires `--yes` when standard input is not a terminal, and refuses with `DOWN_CONFIRMATION_REQUIRED` otherwise. Declining prints `DOWN_CANCELLED` and exits `1` with nothing changed.
 
-Immediately before acting, DevDock re-reads the inventory. If the set of managed containers changed while the prompt was open, or a conflict appeared, it refuses with `DOWN_PLAN_STALE` and nothing is run; rerun `down` to see the current plan.
+Immediately before acting, DevDock re-reads the inventory. If the set of managed containers changed while the prompt was open, or a conflict appeared, it refuses with `DOWN_PLAN_STALE` and nothing is run; rerun `down` to see the current plan. The comparison covers containers; a network or volume that appears in that window is not detected.
+
+When a DevDock container whose service is no longer declared is left in place and is running, the project network is left too, because that container still uses it; the plan says so. If the leftover is stopped, Docker has already released its network endpoint and the network is removed as usual.
 
 The command run is `docker compose --project-directory <root> --file <compose file> --project-name <derived name> down --remove-orphans=false`, with no `--volumes` or `--rmi`. After it returns DevDock re-inventories the project: `DOWN_STOPPED` means the re-inventory succeeded and no planned container or network survived; `DOWN_PARTIAL` is returned, with exit `1`, when something remains or when the re-inventory itself failed, so DevDock never claims success it could not verify. A timeout reports that some resources may already be gone and points at `devdock status`. Runtime output is handled exactly as for `up`.
 
@@ -152,7 +154,7 @@ DevDock runs Compose with its own environment plus three pinned settings: `COMPO
 
 ## Ownership scope
 
-Lifecycle commands (planned) act only on Compose resources DevDock can prove it created. `inspect` already prints the Compose project name DevDock derives for a profile so the resources are recognizable in `docker ps`.
+`up` and `down` act only on Compose resources DevDock can prove it created, and `status` reports which resources those are. `inspect` prints the Compose project name DevDock derives for a profile so the resources are recognizable in `docker ps`.
 
 - The project name is `devdock-<slug>-<digest>`. `<slug>` is the profile's `project` lowercased with every run of non-alphanumeric characters replaced by one hyphen, trimmed, and limited to 40 characters (`project` if nothing remains). `<digest>` is the first 12 hex characters of the SHA-256 of the resolved project root path, case-folded on Windows. The same project at the same directory always maps to the same name; a copy elsewhere gets a different one; symlinked paths to one directory share one name.
 - Before acting, DevDock lists containers under that name (by Compose project label and by anchored name prefix), plus labeled networks and volumes. A container counts as managed only if Compose's own labels show it was created from this project root, from exactly this Compose file, as a service rather than a one-off `compose run`.
@@ -168,18 +170,91 @@ This model protects against accidental overlap: another project, a renamed direc
 
 ## Diagnostic codes
 
-Each `check` result includes a stable code, severity, summary, optional evidence, suggested action, and documentation reference. Scripts should use codes only after the CLI adds its planned versioned machine-readable format; the current human-readable output is not a scripting API.
+Each `check` result and each lifecycle result carries a stable code. This table is complete: a test fails if the source emits a code that is not listed here. Existing codes are never repurposed for a different meaning. The human-readable output around them is not a scripting API; machine-readable output is planned.
 
-| Code family | Examples | Meaning |
+### `check` findings
+
+| Code | Severity | Meaning |
 | --- | --- | --- |
-| Profile/runtime | `PROFILE_VALID`, `PYTHON_VERSION_OK`, `PYTHON_VERSION_TOO_OLD`, `RUNTIME_UNSUPPORTED` | Profile validity and declared runtime support. Python evidence identifies the exact DevDock interpreter. |
-| Docker/Compose | `DOCKER_CLI_MISSING`, `COMPOSE_CLI_UNAVAILABLE`, `DOCKER_DAEMON_UNAVAILABLE`, `DOCKER_DAEMON_PERMISSION_DENIED`, `COMPOSE_CONFIG_INVALID` | Separate CLI/plugin, daemon, and config parser outcomes. A daemon counts as reachable only when `docker version` returns a server version; a socket the user may not open is reported distinctly. Parser output is suppressed to protect interpolated values. |
-| Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
-| Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
-| Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
-| Lifecycle failures | `UP_PORT_CONFLICT`, `UP_IMAGE_NOT_FOUND`, `UP_REGISTRY_AUTH_REQUIRED`, `UP_PULL_FAILED`, `UP_CONFIG_INVALID`, `UP_SERVICE_FAILED`, `UP_RESOURCE_EXHAUSTED`, `DOWN_RESOURCE_IN_USE` | The recognized kind of a failed start or stop. Output is withheld because the code already explains it. |
-| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `DOWN_STOPPED`, `DOWN_PARTIAL`, `DOWN_PLAN_STALE`, `DOWN_CONFIRMATION_REQUIRED`, `DOWN_OWNERSHIP_CONFLICT` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
-| Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
+| `PROFILE_VALID` | PASS | The profile parsed and validated. |
+| `PROJECT_PYTHON_METADATA` | PASS or WARN | Python version metadata was found. PASS when DevDock runs from the project's own virtual environment; WARN when the target interpreter was not inspected. |
+| `PROJECT_PYTHON_METADATA_INVALID` | WARN | A recognized Python metadata file could not be read. |
+| `PYTHON_VERSION_OK` | PASS | The interpreter running DevDock meets the declared minimum. |
+| `PYTHON_VERSION_TOO_OLD` | FAIL | It does not. |
+| `PYTHON_REQUIREMENT_UNSUPPORTED` | FAIL | The Python requirement is not a `>=X.Y` or `>=X.Y.Z` minimum. |
+| `RUNTIME_UNSUPPORTED` | FAIL | A declared runtime other than `python` or `docker`. |
+| `DOCKER_REQUIREMENT_UNSUPPORTED` | FAIL | The Docker requirement is not `compose`. |
+| `DOCKER_CHECKS_SKIPPED` | SKIP | Docker checks did not run because the requirement is unsupported. |
+| `COMPOSE_FILE_FOUND` | PASS | The configured or discovered Compose file exists inside the project. |
+| `COMPOSE_FILE_MISSING` | FAIL | No Compose file was configured or discovered, or the configured one does not exist. |
+| `COMPOSE_FILE_OUTSIDE_PROJECT` | FAIL | The Compose file resolves outside the project after following symlinks. |
+| `DOCKER_CLI_MISSING` | FAIL | No `docker` executable on `PATH`. |
+| `COMPOSE_CLI_AVAILABLE` | PASS | `docker compose version` succeeded. |
+| `COMPOSE_CLI_UNAVAILABLE` | FAIL | The Compose plugin did not respond or exited non-zero. |
+| `DOCKER_DAEMON_AVAILABLE` | PASS | `docker version` returned a server version. |
+| `DOCKER_DAEMON_UNAVAILABLE` | FAIL | The daemon did not answer. |
+| `DOCKER_DAEMON_PERMISSION_DENIED` | FAIL | The daemon socket exists but this user may not open it. |
+| `DOCKER_DAEMON_SKIPPED` | SKIP | The daemon check did not run because the CLI or plugin is missing. |
+| `COMPOSE_CONFIG_VALID` | PASS | `docker compose config` accepted the file. |
+| `COMPOSE_CONFIG_INVALID` | FAIL | It rejected the file. Output is suppressed. |
+| `COMPOSE_CONFIG_UNAVAILABLE` | FAIL | The parser could not be run or timed out. |
+| `COMPOSE_CONFIG_SKIPPED` | SKIP | The parser was not run because a prerequisite failed or there is no safe file. |
+| `ENVIRONMENT_VARIABLE_SET` | PASS | The required variable is set and non-empty. Value redacted. |
+| `ENVIRONMENT_VARIABLE_UNSET` | FAIL | It is not set. |
+| `ENVIRONMENT_VARIABLE_EMPTY` | FAIL | It is set to an empty value. |
+| `REQUIRED_FILE_FOUND`, `REQUIRED_DIRECTORY_FOUND` | PASS | The required path exists with the right type. |
+| `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_MISSING` | FAIL | It does not exist or has the wrong type. |
+| `REQUIRED_FILE_OUTSIDE_PROJECT`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | FAIL | It resolves outside the project. |
+| `REQUIRED_FILE_UNRESOLVABLE`, `REQUIRED_DIRECTORY_UNRESOLVABLE` | FAIL | It could not be resolved, for example a symlink loop. |
+| `PORT_AVAILABLE` | PASS | A loopback bind succeeded at the moment of the check. |
+| `PORT_UNAVAILABLE` | FAIL in `check`; `ADVISORY` in `up` | The bind failed. During `up` this is reported but does not block the start. |
 
-Codes are illustrative and not exhaustive; the `code` field in source is authoritative. Existing codes should not be repurposed for different failure meanings.
+### Lifecycle gates
 
+These stop a command before anything runs. The prefix names the command.
+
+| Code suffix | Commands | Meaning |
+| --- | --- | --- |
+| `_PREFLIGHT_FAILED` | `UP` | A `check` finding other than an advisory one failed. The failures are listed. |
+| `_COMPOSE_FILE_MISSING` | `UP`, `STATUS`, `DOWN` | No Compose file is configured, discoverable, or present. |
+| `_COMPOSE_FILE_OUTSIDE_PROJECT` | `UP`, `STATUS`, `DOWN` | The Compose file resolves outside the project. |
+| `_RUNTIME_UNAVAILABLE` | `UP`, `STATUS`, `DOWN` | The Compose CLI is unavailable, or the Docker executable could not be started. |
+| `_DAEMON_UNAVAILABLE` | `UP`, `STATUS`, `DOWN` | The daemon did not answer, before or during the operation. |
+| `_PERMISSION_DENIED` | `UP`, `STATUS`, `DOWN` | This user may not open the daemon socket, before or during the operation. |
+| `_OWNERSHIP_CONFLICT` | `UP`, `DOWN` | A resource under the project name is not provably DevDock's, or the inventory was incomplete. |
+| `_CONFIG_UNREADABLE` | `DOWN` | The Compose file's services could not be listed, so the plan cannot be built. |
+| `_CONFIRMATION_REQUIRED` | `DOWN` | Standard input is not a terminal and `--yes` was not given. |
+| `_CANCELLED` | `DOWN` | The user declined the prompt. |
+| `_PLAN_STALE` | `DOWN` | The managed containers changed between the plan and the confirmation. |
+
+### Lifecycle outcomes
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `UP_STARTED` | 0 | Compose started the services. Readiness was not verified. |
+| `UP_TIMED_OUT`, `DOWN_TIMED_OUT` | 1 | The operation exceeded `--timeout`; resources may be partially created or removed. |
+| `STATUS_REPORTED` | 0 | The report is complete. |
+| `STATUS_INCOMPLETE` | 1 | A runtime query failed; the partial report is still shown. |
+| `DOWN_DRY_RUN` | 0 | The plan was shown and nothing changed. |
+| `DOWN_NOTHING_TO_STOP` | 0 | No removable container or network exists; no command was run. |
+| `DOWN_STOPPED` | 0 | Everything the plan said would be removed is gone, and the re-inventory succeeded. |
+| `DOWN_PARTIAL` | 1 | Something planned for removal survived, or the result could not be verified. |
+
+### Recognized runtime failures
+
+When Compose exits non-zero, DevDock classifies its message and reports one of these with the command prefix (`UP_` or `DOWN_`). Output is hidden for recognized kinds because the code and suggested action already explain the problem.
+
+| Code suffix | Meaning |
+| --- | --- |
+| `_PERMISSION_DENIED` | Docker refused the connection for this user. |
+| `_DAEMON_UNAVAILABLE` | The daemon stopped responding during the operation. |
+| `_CONFIG_INVALID` | Compose rejected the configuration at run time. |
+| `_REGISTRY_AUTH_REQUIRED` | The registry needs `docker login`. |
+| `_IMAGE_NOT_FOUND` | The image or tag does not exist. |
+| `_PULL_FAILED` | The image could not be downloaded: network, proxy, timeout, TLS, or rate limit. |
+| `_PORT_CONFLICT` | A published port is already in use. |
+| `_NETWORK_CONFLICT` | A network exists or an address pool overlaps. |
+| `_RESOURCE_EXHAUSTED` | Out of disk space, memory, or file handles. |
+| `_RESOURCE_IN_USE` | A network or volume is still attached. |
+| `_SERVICE_FAILED` | A container exited or a dependency never became healthy. |
+| `_FAILED` | Not recognized. A redacted tail of the output is shown. |

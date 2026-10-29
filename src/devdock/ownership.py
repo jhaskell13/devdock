@@ -21,16 +21,14 @@ from pathlib import Path
 from typing import Literal
 
 from devdock.adapters.base import ContainerRecord, NetworkRecord, ResourceInventory
+from devdock.adapters.compose import PROJECT_LABEL, SAFE_PROJECT_NAME
 from devdock.config import ProjectProfile
 from devdock.discovery import COMPOSE_NAMES
 
 NAME_PREFIX = "devdock"
 ROOT_DIGEST_LENGTH = 12
 SLUG_MAX_LENGTH = 40
-_VALID_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _SLUG_SEPARATORS = re.compile(r"[^a-z0-9]+")
-
-PROJECT_LABEL = "com.docker.compose.project"
 WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
 CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
 SERVICE_LABEL = "com.docker.compose.service"
@@ -76,7 +74,7 @@ def derive_project_name(project: str, root: Path) -> str:
     """
 
     name = f"{NAME_PREFIX}-{_slug(project)}-{_root_digest(root)}"
-    if not _VALID_PROJECT_NAME.fullmatch(name):  # pragma: no cover - defensive
+    if not SAFE_PROJECT_NAME.fullmatch(name):  # pragma: no cover - defensive
         raise ValueError(f"derived project name is not Compose-safe: {name!r}")
     return name
 
@@ -101,16 +99,24 @@ class OwnershipScope:
     def expected_config_files(self) -> str | None:
         return None if self.compose_file is None else str(self.compose_file)
 
-    def describe(self) -> tuple[str, ...]:
-        """Human-readable lines printed before any lifecycle action."""
+    def describe(self, *, boundary: bool = True) -> tuple[str, ...]:
+        """Human-readable lines printed before any lifecycle action.
+
+        ``boundary`` adds the sentence stating what DevDock will and will not
+        touch; reports that are not about to act omit it.
+        """
 
         compose = (
             "none configured or discovered" if self.compose_file is None else str(self.compose_file)
         )
-        return (
+        lines = (
             f"Compose project name: {self.project_name}",
             f"Project root: {self.root}",
             f"Compose file: {compose}",
+        )
+        if not boundary:
+            return lines
+        return lines + (
             "DevDock acts only on resources that Compose labeled with this project name, "
             "working directory, and Compose file.",
         )

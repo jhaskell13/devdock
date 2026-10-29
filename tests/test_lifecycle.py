@@ -536,7 +536,8 @@ def test_plan_lists_affected_remaining_networks_and_preserved_volumes(tmp_path: 
     assert [item.service for item in plan.remaining] == ["legacy"]
     text = "\n".join(plan.explain())
     assert "Will stop and remove 2 container(s)" in text
-    assert "Will remove 1 project network(s)" in text
+    assert "Will remove" not in text.split("Will leave")[0].split("Will stop")[1]
+    assert "network(s) in place" in text  # legacy is running and holds the network
     assert "no longer declared" in text and "legacy" in text
     assert "Will preserve 1 volume(s)" in text and "_pgdata" in text
     assert adapter.stops == []
@@ -647,7 +648,7 @@ def test_execute_reports_partial_when_resources_survive(tmp_path: Path) -> None:
 
     assert not result.ok and result.code == "DOWN_PARTIAL"
     assert "2 container(s) still exist" in text
-    assert "network(s) still exist" in text
+    assert "network(s) still exist" not in text  # the running leftover is expected to hold it
 
 
 def test_execute_with_nothing_to_do_is_idempotent_and_runs_no_command(tmp_path: Path) -> None:
@@ -853,3 +854,123 @@ def test_advisory_findings_are_not_labelled_as_failures(tmp_path: Path) -> None:
     assert "[FAIL]" not in text
     assert "[ADVISORY] PORT_UNAVAILABLE" in text
     assert "did not block this start" in text
+
+
+def test_networks_kept_for_an_undeclared_container_are_planned_and_not_a_failure(
+    tmp_path: Path,
+) -> None:
+    """Leaving an undeclared container means its network must survive too.
+
+    Reporting that survival as DOWN_PARTIAL told the user to retry a stop that
+    could never complete. The plan now says the network stays, and the
+    verification treats that as the expected outcome.
+    """
+    root, scope, inventory = running_project(tmp_path)
+    legacy = inventory.containers[2]
+    after = ResourceInventory(
+        scope.project_name,
+        containers=(legacy,),
+        networks=inventory.networks,  # still in use by the legacy container
+        volumes=inventory.volumes,
+    )
+    adapter = StopAdapter(inventory=inventory, after=after)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+    preview = "\n".join(plan.explain())
+
+    assert plan.networks_removable == ()
+    assert (
+        "Will remove" not in preview.split("Will leave")[0]
+        or "network" not in preview.split("Will leave")[0]
+    )
+    assert "network(s) in place" in preview
+    assert "docker rm" in preview
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+
+    assert result.ok and result.code == "DOWN_STOPPED", "\n".join(result.lines)
+    assert "Warning" not in "\n".join(result.lines)
+    assert "Left in place as planned: 1 container(s)" in "\n".join(result.lines)
+
+
+def test_only_undeclared_containers_left_means_nothing_to_stop(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    legacy = managed(scope, f"{scope.project_name}-legacy-1", "legacy")
+    inventory = ResourceInventory(
+        scope.project_name,
+        containers=(legacy,),
+        networks=(NetworkRecord("n1", f"{scope.project_name}_default"),),
+    )
+    adapter = StopAdapter(inventory=inventory)
+
+    plan = plan_stop(profile(), root, adapter=adapter)
+
+    assert isinstance(plan, StopPlan) and plan.nothing_to_do
+    result = execute_stop(plan, adapter=adapter, environ={})
+    assert result.code == "DOWN_NOTHING_TO_STOP" and adapter.stops == []
+
+
+def test_surviving_network_without_a_reason_is_still_partial(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    no_remaining = ResourceInventory(
+        scope.project_name, containers=inventory.containers[:2], networks=inventory.networks
+    )
+    after = ResourceInventory(scope.project_name, networks=inventory.networks)
+    adapter = StopAdapter(inventory=no_remaining, after=after)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan) and not plan.remaining
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+
+    assert result.code == "DOWN_PARTIAL"
+
+
+def test_a_stopped_leftover_does_not_hold_the_network(tmp_path: Path) -> None:
+    """Docker releases endpoints on stop, so Compose will remove the network."""
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    web = managed(scope, f"{scope.project_name}-web-1", "web")
+    legacy = managed(scope, f"{scope.project_name}-legacy-1", "legacy", state="exited")
+    network = NetworkRecord("n1", f"{scope.project_name}_default")
+    inventory = ResourceInventory(scope.project_name, containers=(web, legacy), networks=(network,))
+    after = ResourceInventory(scope.project_name, containers=(legacy,))  # network gone
+    adapter = StopAdapter(inventory=inventory, after=after)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    assert plan.remaining == (legacy,) and plan.remaining_in_use == ()
+    assert plan.networks_removable == (network,)
+    assert "Will remove 1 project network(s)" in "\n".join(plan.explain())
+    assert execute_stop(plan, adapter=adapter, environ={}).code == "DOWN_STOPPED"
+
+
+def test_timeout_evidence_includes_the_inspect_command_it_refers_to(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = FakeAdapter(outcome=OperationOutcome("timed_out"))
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, timeout=3)
+
+    text = "\n".join(result.lines)
+    assert "docker ps command above" in (result.remedy or "")
+    assert "docker ps -a --filter label=com.docker.compose.project=" in text
+
+
+def test_all_three_commands_share_identical_gate_wording(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    denied = ComposeCapabilities(
+        executable="docker",
+        compose_cli="available",
+        compose_cli_returncode=0,
+        daemon="permission_denied",
+    )
+    up = start_project(profile(), root, adapter=FakeAdapter(capabilities=denied), environ={})
+    status = project_status(profile(), root, adapter=StatusAdapter(capabilities=denied))
+    down = plan_stop(profile(), root, adapter=StopAdapter(capabilities=denied))
+    assert isinstance(down, LifecycleResult)
+
+    assert {up.remedy, status.remedy, down.remedy} == {up.remedy}
+    assert all(
+        r.summary.endswith("this user may not connect to the Docker daemon.")
+        for r in (up, status, down)
+    )

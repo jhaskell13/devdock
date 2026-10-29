@@ -16,6 +16,10 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- `devdock init` templated the project name into YAML unquoted, so a directory named `true`, `1.0`, or `a: b` produced a profile that failed validation. The profile is now serialized.
+- `down` reported `DOWN_PARTIAL` after correctly leaving an undeclared running container in place, because that container kept the project network alive. The plan now says the network will stay, and the verification expects it.
+- `UP_TIMED_OUT` referred to a `docker ps` command that was not always printed. It is now included in the evidence.
+- The `DOCKER_DAEMON_AVAILABLE` evidence still mentioned `docker info` after the probe switched to `docker version`.
 - `up` and `down` printed the runtime's raw progress output on success, contradicting the documented contract and showing duplicated Compose lines. Output on success now waits behind `--show-output`, as documented.
 - A port probe that failed during `up` preflight printed as `[FAIL]` inside an `[OK]` result. It now prints as `[ADVISORY]` with an explanation that it did not block the start.
 - The failure taxonomy did not recognize `context deadline exceeded`, Go's standard timeout wording and what Docker reports for a registry it cannot reach, so an unreachable registry fell through to `UP_FAILED`. Registry connection markers were added and verified against a real daemon.

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, RuntimeAdapter
-from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
+from devdock.adapters.compose import PROJECT_LABEL, START_TIMEOUT, STOP_TIMEOUT
 from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
 from devdock.failures import PERMISSION_DENIED_REMEDY, FailureExplanation, classify_failure
@@ -45,10 +45,73 @@ class LifecycleResult:
 # a blocking failure would make a second `devdock up` refuse. The authoritative
 # test is Compose's own bind, which reports UP_PORT_CONFLICT when it fails.
 PREFLIGHT_ADVISORY_CODES = frozenset({"PORT_UNAVAILABLE"})
+ENDPOINT_HOLDING_STATES = frozenset({"running", "paused", "restarting"})
 
 
 def _refusal(code: str, summary: str, lines: tuple[str, ...], remedy: str) -> LifecycleResult:
     return LifecycleResult(code, False, summary, lines, remedy)
+
+
+def _gates(
+    scope: OwnershipScope, runtime: RuntimeAdapter, prefix: str, lead: str
+) -> Path | LifecycleResult:
+    """Checks every lifecycle command shares, in order: Compose file, then runtime.
+
+    Returns the usable Compose file path, or the refusal that stops the command.
+    One implementation keeps the three commands from drifting apart; the
+    permission-denied gate once had to be added in three places.
+    """
+
+    if scope.compose_file is None:
+        return _refusal(
+            f"{prefix}_COMPOSE_FILE_MISSING",
+            f"{lead}: no Compose file is configured or discoverable.",
+            (f"Project root: {scope.root}",),
+            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
+        )
+    if not resolves_inside(scope.compose_file, scope.root):
+        return _refusal(
+            f"{prefix}_COMPOSE_FILE_OUTSIDE_PROJECT",
+            f"{lead}: the Compose file does not resolve inside the project.",
+            (f"Compose file: {scope.compose_file}",),
+            "Remove the escaping symlink or choose a project-contained Compose file.",
+        )
+    if not scope.compose_file.is_file():
+        return _refusal(
+            f"{prefix}_COMPOSE_FILE_MISSING",
+            f"{lead}: the configured Compose file does not exist.",
+            (f"Expected path: {scope.compose_file}",),
+            "Restore the file or update compose_file in devdock.yaml. Compose needs it to "
+            "identify the project's resources.",
+        )
+
+    capabilities = runtime.detect_capabilities()
+    if not capabilities.compose_available:
+        return _refusal(
+            f"{prefix}_RUNTIME_UNAVAILABLE",
+            f"{lead}: the Docker Compose CLI is not available.",
+            (),
+            "Install Docker with the Compose plugin, then retry.",
+        )
+    if capabilities.daemon == "permission_denied":
+        return _refusal(
+            f"{prefix}_PERMISSION_DENIED",
+            f"{lead}: this user may not connect to the Docker daemon.",
+            (),
+            PERMISSION_DENIED_REMEDY,
+        )
+    if not capabilities.daemon_available:
+        return _refusal(
+            f"{prefix}_DAEMON_UNAVAILABLE",
+            f"{lead}: the Docker daemon did not respond.",
+            (),
+            "Start Docker Desktop or the Docker Engine service and retry.",
+        )
+    return scope.compose_file
+
+
+def _inspect_hint(scope: OwnershipScope) -> str:
+    return f"Inspect with: docker ps -a --filter label={PROJECT_LABEL}={scope.project_name}"
 
 
 def start_project(
@@ -90,50 +153,9 @@ def start_project(
         )
 
     scope = ownership_scope(profile, root)
-    if scope.compose_file is None:
-        return _refusal(
-            "UP_COMPOSE_FILE_MISSING",
-            "Refusing to start: no Compose file is configured or discoverable.",
-            (f"Project root: {scope.root}",),
-            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
-        )
-    if not resolves_inside(scope.compose_file, scope.root):
-        return _refusal(
-            "UP_COMPOSE_FILE_OUTSIDE_PROJECT",
-            "Refusing to start: the Compose file does not resolve inside the project.",
-            (f"Compose file: {scope.compose_file}",),
-            "Remove the escaping symlink or choose a project-contained Compose file.",
-        )
-    if not scope.compose_file.is_file():
-        return _refusal(
-            "UP_COMPOSE_FILE_MISSING",
-            "Refusing to start: the configured Compose file does not exist.",
-            (f"Expected path: {scope.compose_file}",),
-            "Create the file or update compose_file in devdock.yaml.",
-        )
-
-    capabilities = runtime.detect_capabilities()
-    if not capabilities.compose_available:
-        return _refusal(
-            "UP_RUNTIME_UNAVAILABLE",
-            "Refusing to start: the Docker Compose CLI is not available.",
-            (),
-            "Install Docker with the Compose plugin, then retry.",
-        )
-    if capabilities.daemon == "permission_denied":
-        return _refusal(
-            "UP_PERMISSION_DENIED",
-            "Refusing to start: this user may not connect to the Docker daemon.",
-            (),
-            PERMISSION_DENIED_REMEDY,
-        )
-    if not capabilities.daemon_available:
-        return _refusal(
-            "UP_DAEMON_UNAVAILABLE",
-            "Refusing to start: the Docker daemon did not respond.",
-            (),
-            "Start Docker Desktop or the Docker Engine service and retry.",
-        )
+    compose_file = _gates(scope, runtime, "UP", "Refusing to start")
+    if isinstance(compose_file, LifecycleResult):
+        return compose_file
 
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
     preview = assessment.explain() + advisories
@@ -148,7 +170,7 @@ def start_project(
     outcome = runtime.start(
         project_name=scope.project_name,
         project_root=scope.root,
-        compose_file=scope.compose_file,
+        compose_file=compose_file,
         timeout=timeout,
     )
     captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
@@ -164,9 +186,11 @@ def start_project(
         return _refusal(
             "UP_TIMED_OUT",
             f"Start did not finish within {timeout:g} seconds and was stopped.",
-            preview + ("Containers may have been created before the timeout.",) + captured,
-            "Run 'devdock up' again with a longer --timeout, or inspect the project with "
-            "the docker ps command above.",
+            preview
+            + ("Containers may have been created before the timeout.", _inspect_hint(scope))
+            + captured,
+            "Run 'devdock up' again with a longer --timeout, or inspect the project with the "
+            "docker ps command above.",
         )
     if outcome.status == "failed":
         failure = classify_failure("UP", outcome.raw_stdout, outcome.raw_stderr)
@@ -252,59 +276,16 @@ def project_status(
 
     runtime = ComposeAdapter() if adapter is None else adapter
     scope = ownership_scope(profile, root)
-    if scope.compose_file is None:
-        return _refusal(
-            "STATUS_COMPOSE_FILE_MISSING",
-            "Cannot report status: no Compose file is configured or discoverable.",
-            (f"Project root: {scope.root}",),
-            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
-        )
-    if not resolves_inside(scope.compose_file, scope.root):
-        return _refusal(
-            "STATUS_COMPOSE_FILE_OUTSIDE_PROJECT",
-            "Cannot report status: the Compose file does not resolve inside the project.",
-            (f"Compose file: {scope.compose_file}",),
-            "Remove the escaping symlink or choose a project-contained Compose file.",
-        )
-    if not scope.compose_file.is_file():
-        return _refusal(
-            "STATUS_COMPOSE_FILE_MISSING",
-            "Cannot report status: the configured Compose file does not exist.",
-            (f"Expected path: {scope.compose_file}",),
-            "Create the file or update compose_file in devdock.yaml.",
-        )
-
-    capabilities = runtime.detect_capabilities()
-    if not capabilities.compose_available:
-        return _refusal(
-            "STATUS_RUNTIME_UNAVAILABLE",
-            "Cannot report status: the Docker Compose CLI is not available.",
-            (),
-            "Install Docker with the Compose plugin, then retry.",
-        )
-    if capabilities.daemon == "permission_denied":
-        return _refusal(
-            "STATUS_PERMISSION_DENIED",
-            "Cannot report status: this user may not connect to the Docker daemon.",
-            (),
-            PERMISSION_DENIED_REMEDY,
-        )
-    if not capabilities.daemon_available:
-        return _refusal(
-            "STATUS_DAEMON_UNAVAILABLE",
-            "Cannot report status: the Docker daemon did not respond.",
-            (),
-            "Start Docker Desktop or the Docker Engine service and retry.",
-        )
+    compose_file = _gates(scope, runtime, "STATUS", "Cannot report status")
+    if isinstance(compose_file, LifecycleResult):
+        return compose_file
 
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
-    declared = runtime.list_declared_services(
-        project_root=scope.root, compose_file=scope.compose_file
-    )
+    declared = runtime.list_declared_services(project_root=scope.root, compose_file=compose_file)
     observed = runtime.observe_services(
         project_name=scope.project_name,
         project_root=scope.root,
-        compose_file=scope.compose_file,
+        compose_file=compose_file,
     )
     services, notes = build_service_statuses(declared.names, assessment.managed, observed.items)
     errors = list(assessment.errors)
@@ -357,25 +338,54 @@ class StopPlan:
     volumes: tuple[str, ...]
 
     @property
+    def remaining_in_use(self) -> tuple[ContainerRecord, ...]:
+        """Leftover containers that still hold a network endpoint.
+
+        Docker releases endpoints when a container stops, so only running,
+        paused, or restarting leftovers keep Compose from removing a network.
+        Verified against a real daemon in both states.
+        """
+
+        return tuple(
+            item for item in self.remaining if item.state.lower() in ENDPOINT_HOLDING_STATES
+        )
+
+    @property
+    def networks_removable(self) -> tuple[NetworkRecord, ...]:
+        """Networks Compose can remove: none while a running leftover uses them."""
+
+        return () if self.remaining_in_use else self.networks
+
+    @property
     def nothing_to_do(self) -> bool:
-        return not self.affected and not self.networks
+        return not self.affected and not self.networks_removable
 
     def explain(self) -> tuple[str, ...]:
-        lines = list(self.scope.describe()[:3])
+        lines = list(self.scope.describe(boundary=False))
         if self.affected:
             lines.append(f"Will stop and remove {len(self.affected)} container(s):")
             lines.extend(f"  {item.name} [{item.service}] {item.state}" for item in self.affected)
         else:
             lines.append("Will stop and remove containers: none are running or stopped.")
-        if self.networks:
-            lines.append(f"Will remove {len(self.networks)} project network(s):")
-            lines.extend(f"  {item.name}" for item in self.networks)
+        if self.networks_removable:
+            lines.append(f"Will remove {len(self.networks_removable)} project network(s):")
+            lines.extend(f"  {item.name}" for item in self.networks_removable)
         if self.remaining:
             lines.append(
                 f"Will leave {len(self.remaining)} DevDock container(s) whose service is no "
                 "longer declared in the Compose file:"
             )
             lines.extend(f"  {item.name} [{item.service}]" for item in self.remaining)
+            if self.remaining_in_use and self.networks:
+                lines.append(
+                    f"Will leave {len(self.networks)} project network(s) in place; "
+                    f"{len(self.remaining_in_use)} running undeclared container(s) still use them:"
+                )
+                lines.extend(f"  {item.name}" for item in self.networks)
+            lines.append(
+                "To remove undeclared containers, restore their service to the Compose file "
+                "and run 'devdock down' again, or remove them with 'docker rm'."
+            )
         if self.volumes:
             lines.append(
                 f"Will preserve {len(self.volumes)} volume(s); DevDock never removes "
@@ -397,50 +407,9 @@ def plan_stop(
 
     runtime = ComposeAdapter() if adapter is None else adapter
     scope = ownership_scope(profile, root)
-    if scope.compose_file is None:
-        return _refusal(
-            "DOWN_COMPOSE_FILE_MISSING",
-            "Refusing to stop: no Compose file is configured or discoverable.",
-            (f"Project root: {scope.root}",),
-            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
-        )
-    if not resolves_inside(scope.compose_file, scope.root):
-        return _refusal(
-            "DOWN_COMPOSE_FILE_OUTSIDE_PROJECT",
-            "Refusing to stop: the Compose file does not resolve inside the project.",
-            (f"Compose file: {scope.compose_file}",),
-            "Remove the escaping symlink or choose a project-contained Compose file.",
-        )
-    if not scope.compose_file.is_file():
-        return _refusal(
-            "DOWN_COMPOSE_FILE_MISSING",
-            "Refusing to stop: the configured Compose file does not exist.",
-            (f"Expected path: {scope.compose_file}",),
-            "Restore the file; Compose needs it to identify the project's resources.",
-        )
-
-    capabilities = runtime.detect_capabilities()
-    if not capabilities.compose_available:
-        return _refusal(
-            "DOWN_RUNTIME_UNAVAILABLE",
-            "Refusing to stop: the Docker Compose CLI is not available.",
-            (),
-            "Install Docker with the Compose plugin, then retry.",
-        )
-    if capabilities.daemon == "permission_denied":
-        return _refusal(
-            "DOWN_PERMISSION_DENIED",
-            "Refusing to stop: this user may not connect to the Docker daemon.",
-            (),
-            PERMISSION_DENIED_REMEDY,
-        )
-    if not capabilities.daemon_available:
-        return _refusal(
-            "DOWN_DAEMON_UNAVAILABLE",
-            "Refusing to stop: the Docker daemon did not respond.",
-            (),
-            "Start Docker Desktop or the Docker Engine service and retry.",
-        )
+    compose_file = _gates(scope, runtime, "DOWN", "Refusing to stop")
+    if isinstance(compose_file, LifecycleResult):
+        return compose_file
 
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
     if not assessment.safe_to_act:
@@ -450,9 +419,7 @@ def plan_stop(
             assessment.explain(),
             "Resolve the conflicts above, then retry.",
         )
-    declared = runtime.list_declared_services(
-        project_root=scope.root, compose_file=scope.compose_file
-    )
+    declared = runtime.list_declared_services(project_root=scope.root, compose_file=compose_file)
     if declared.error:
         return _refusal(
             "DOWN_CONFIG_UNREADABLE",
@@ -486,7 +453,8 @@ def execute_stop(
     runtime = ComposeAdapter() if adapter is None else adapter
     env = os.environ if environ is None else environ
     scope = plan.scope
-    if scope.compose_file is None:  # plan_stop never produces this; guard the public API
+    compose_file = scope.compose_file
+    if compose_file is None:  # plan_stop never produces this; guard the public API
         raise ValueError("a stop plan requires a Compose file")
     if plan.nothing_to_do:
         return LifecycleResult(
@@ -509,7 +477,7 @@ def execute_stop(
     outcome = runtime.stop(
         project_name=scope.project_name,
         project_root=scope.root,
-        compose_file=scope.compose_file,
+        compose_file=compose_file,
         timeout=timeout,
     )
     captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
@@ -551,8 +519,9 @@ def execute_stop(
     if leftover:
         lines.append(f"Warning: {len(leftover)} container(s) still exist after down:")
         lines.extend(f"  {item.name} {item.state}" for item in leftover)
-    if after.networks:
-        lines.append(f"Warning: {len(after.networks)} project network(s) still exist.")
+    unexpected_networks = () if plan.remaining_in_use else after.networks
+    if unexpected_networks:
+        lines.append(f"Warning: {len(unexpected_networks)} project network(s) still exist.")
     if plan.remaining:
         lines.append(
             f"Left in place as planned: {len(plan.remaining)} container(s) from undeclared "
@@ -565,7 +534,7 @@ def execute_stop(
             "Could not verify the result; the post-stop inventory was incomplete: "
             + "; ".join(after.errors)
         )
-    verified = not leftover and not after.networks and not after.errors
+    verified = not leftover and not unexpected_networks and not after.errors
     code = "DOWN_STOPPED" if verified else "DOWN_PARTIAL"
     return LifecycleResult(
         code,

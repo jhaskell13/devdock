@@ -2,7 +2,7 @@
 
 DevDock is a local development environment manager. Its goal is to make software projects easier to inspect, configure, start, troubleshoot, and stop on a developer's own machine.
 
-The repository foundation milestone is complete. The current CLI can create a profile, discover project files, validate that profile, and check a small set of declared prerequisites. It does not start or stop services yet.
+Milestones 0 through 2 are complete. The CLI can create a profile, discover project files, validate the profile, check declared prerequisites, and start, report on, and stop a project's Docker Compose services while proving which resources it owns. It does not yet wait for services to become ready or recover interrupted operations; see [`ROADMAP.md`](ROADMAP.md).
 
 ## What DevDock does today
 
@@ -18,7 +18,7 @@ The repository foundation milestone is complete. The current CLI can create a pr
 
 See [`docs/cli.md`](docs/cli.md) for exact discovery, output, and exit-code behavior.
 
-`check` verifies that the Docker CLI and Compose plugin respond to `docker compose version`; it does not check whether the Docker daemon is running or start containers. Required environment variables must be set in the process environment. DevDock does not load `.env` files or print environment variable values.
+`check` verifies that the Docker CLI and Compose plugin respond, that the daemon answers `docker version`, and that the Compose file parses; it does not start containers. Required environment variables must be set in the process environment. DevDock does not load `.env` files or print environment variable values.
 
 ## Requirements
 
@@ -135,7 +135,7 @@ Do not commit real credentials, `.env` files, customer data, or other sensitive 
 - Exit code `1`: the profile is missing or invalid, or at least one check failed. Findings include a suggested action when DevDock can provide one.
 - CLI usage errors use Typer's argument parsing exit behavior.
 
-`devdock up` starts the project's Compose services detached once the diagnostics pass and DevDock can prove every resource under its derived project name is its own. It does not wait for services to become ready; `devdock status` shows per-service state, health, and a readiness class that keeps running distinct from ready. `devdock down` previews and confirms before stopping containers and networks, and never removes volumes. The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Output from Docker commands is suppressed except for executable paths and exit status. Readiness waiting, dependency ordering, recovery of interrupted operations, and any volume removal remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).
+`devdock up` starts the project's Compose services detached once the diagnostics pass and DevDock can prove every resource under its derived project name is its own. It does not wait for services to become ready; `devdock status` shows per-service state, health, and a readiness class that keeps running distinct from ready. `devdock down` previews and confirms before stopping containers and networks, and never removes volumes. The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Output from Docker commands is hidden on success and for recognized failures; unrecognized failures show a redacted tail, and `--show-output` shows everything, still redacted. Readiness waiting, dependency ordering, recovery of interrupted operations, and any volume removal remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).
 
 ## Troubleshooting
 
@@ -153,7 +153,7 @@ Run `devdock init` in the intended project directory, or pass the directory cont
 
 **A runtime is reported as unsupported**
 
-The first implementation checks Python minimum versions and Docker Compose availability. Other runtime adapters are planned; see [`ROADMAP.md`](ROADMAP.md).
+Docker Compose is the only runtime adapter. Python checks compare the interpreter running DevDock against the declared minimum. Other runtime adapters are planned; see [`ROADMAP.md`](ROADMAP.md).
 
 **A required variable is reported as missing**
 
@@ -183,7 +183,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local workflow. From the reposi
 .\.venv\Scripts\python.exe -m mypy src/devdock
 ```
 
-DevDock is intended to use synthetic disposable projects for automated checks. Tests must not require production systems, customer records, real credentials, or access to a running Docker daemon unless a future integration suite explicitly documents an isolated disposable setup.
+DevDock is intended to use synthetic disposable projects for automated checks. Tests must not require production systems, customer records, or real credentials. The default suite never needs a Docker daemon; the separately selected `docker` suite creates only disposable local resources and removes them afterwards, as documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Project plans
 

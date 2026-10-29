@@ -66,7 +66,10 @@ _CONTAINER_FORMAT = _FIELD_SEPARATOR.join(
 _CONTAINER_FIELD_COUNT = 8
 _NETWORK_FORMAT = _FIELD_SEPARATOR.join((_json_field(".ID"), _json_field(".Name")))
 _VOLUME_FORMAT = _json_field(".Name")
-_SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# Compose-safe project names: also inert inside --filter expressions, so this
+# is the single rule that ownership.py derives names against and the adapter
+# re-checks before every invocation.
+SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 # Compose reads COMPOSE_* settings from the project's .env, which DevDock treats
 # as untrusted. Shell environment beats .env in Compose's precedence, so pinning
@@ -193,7 +196,7 @@ class ComposeAdapter:
         filter expressions.
         """
 
-        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
+        if not SAFE_PROJECT_NAME.fullmatch(project_name):
             raise ValueError(f"project name is not filter-safe: {project_name!r}")
         executable = self._locate("docker")
         if executable is None:
@@ -283,8 +286,6 @@ class ComposeAdapter:
         as being ready. Readiness waiting is deliberately absent here.
         """
 
-        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
-            raise ValueError(f"project name is not filter-safe: {project_name!r}")
         executable = self._locate("docker")
         if executable is None:
             return OperationOutcome("unavailable")
@@ -297,7 +298,7 @@ class ComposeAdapter:
     ) -> list[str]:
         """Common ``docker compose`` prefix; rejects names that are unsafe in filters."""
 
-        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
+        if not SAFE_PROJECT_NAME.fullmatch(project_name):
             raise ValueError(f"project name is not filter-safe: {project_name!r}")
         return [
             executable,

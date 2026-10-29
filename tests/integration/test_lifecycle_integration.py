@@ -55,7 +55,7 @@ def stop(root: Path) -> str:
     return execute_stop(plan, adapter=adapter(), timeout=180).code
 
 
-def test_a_project_can_be_started_queried_and_stopped(project: Path) -> None:
+def test_a_project_can_be_started_queried_and_stopped(project: Path, host_port: int) -> None:
     before = run_devdock(["status"], project)
     assert "missing" in before.stdout
 
@@ -66,7 +66,7 @@ def test_a_project_can_be_started_queried_and_stopped(project: Path) -> None:
     queried = run_devdock(["status"], project)
     assert queried.returncode == 0, queried.stdout + queried.stderr
     assert "STATUS_REPORTED" in queried.stdout
-    assert "18080->80/tcp" in queried.stdout
+    assert f"{host_port}->80/tcp" in queried.stdout
 
     stopped = run_devdock(["down", "--yes"], project)
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
@@ -253,7 +253,7 @@ def test_missing_tag_is_classified_as_image_not_found(project: Path) -> None:
 
 
 def test_compose_ps_json_fields_parse_against_the_real_runtime(
-    project: Path, scope: OwnershipScope
+    project: Path, scope: OwnershipScope, host_port: int
 ) -> None:
     """Confirms the field names the status parser relies on."""
 
@@ -270,7 +270,7 @@ def test_compose_ps_json_fields_parse_against_the_real_runtime(
     assert len(observations.items) == 2
     web = next(item for item in observations.items if item.service == "web")
     assert web.id and web.name and web.state == "running"
-    assert any(port.host_port == 18080 and port.container_port == 80 for port in web.ports)
+    assert any(port.host_port == host_port and port.container_port == 80 for port in web.ports)
 
 
 def test_devdock_reports_ownership_scope_before_acting(
