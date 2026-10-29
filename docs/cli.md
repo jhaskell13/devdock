@@ -9,6 +9,7 @@ This page describes behavior currently implemented by DevDock. Options may be ad
 | `devdock init [DIRECTORY]` | `.` | Creates the directory if needed, then writes a starter `devdock.yaml`. Refuses to overwrite an existing profile. |
 | `devdock inspect [DIRECTORY]` | `.` | Finds the nearest project root and reports the profile and common Compose files. If a profile exists, validates it and reports the configured project, runtimes, and the Compose project name DevDock will manage. |
 | `devdock up [DIRECTORY]` | `.` | Runs the profile's checks, proves ownership, then starts the project's Compose services detached. Refuses before any mutation if a check fails, the Compose file is missing or escapes the project, Docker is unavailable, or any resource under the project name is not DevDock's. |
+| `devdock status [DIRECTORY]` | `.` | Reports each declared service's container, state, Compose health, readiness class, and published ports. Read-only; ownership conflicts are listed, not treated as a refusal. |
 | `devdock check [DIRECTORY]` | `.` | Finds the nearest project root, requires `devdock.yaml`, validates it, then runs the checks declared by that profile. |
 | `devdock --help` | — | Lists commands and options. Each command also accepts `--help`. |
 
@@ -40,6 +41,7 @@ Unknown fields are errors. The schema does not load `.env`, expand variables, ex
 - `init` prints the created profile path to standard output and exits `0`. If the profile already exists, it writes an error to standard error and exits `1` without replacing the file.
 - `inspect` prints the selected root and discovered files to standard output. Invalid profile data is reported on standard error and exits `1`; otherwise it exits `0`.
 - `up` prints its result as `[OK]` or `[REFUSED]` with a stable code, the ownership preview, and any redacted runtime output. Successful runs go to standard output and exit `0`; refusals and failures go to standard error and exit `1`.
+- `status` prints `[OK] STATUS_REPORTED` followed by the table on standard output and exits `0`, or `STATUS_INCOMPLETE`/a refusal code on standard error with exit `1`.
 - `check` prints each finding to standard output as `[PASS]`, `[WARN]`, `[SKIP]`, or `[FAIL]` followed by a stable code and summary, then optional evidence and a suggested action. Warnings and skipped checks do not fail the command. It exits `0` if there are no failed findings and `1` if the profile is missing/invalid or any check fails.
 - Typer handles command-line syntax and argument errors; those use its parser exit behavior.
 
@@ -74,6 +76,28 @@ Both paths are redacted and `--show-output` does not disable redaction. Any valu
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env` file, which DevDock never opens, so a value that exists only there cannot be recognized and could appear in output. Treat `--show-output` as a deliberate disclosure and review what you paste elsewhere.
 
+## Reporting status
+
+`devdock status` is read-only. It needs a Compose file inside the project and a responsive Docker daemon; it does not require the profile's checks to pass, because a status report is most useful when something is wrong.
+
+It combines three sources: the ownership inventory (which containers are provably DevDock's), `docker compose config --services` (which services the current Compose file declares; names only, no rendered values), and `docker compose ps --all --format json` (state, health, exit code, published ports). From the runtime report DevDock keeps only ID, name, service, state, health, exit code, and publishers; image, command, and labels are discarded at parse time.
+
+Each row carries a readiness class. These are the vocabulary later readiness work builds on:
+
+| Readiness | Meaning |
+| --- | --- |
+| `ready` | Running and the Compose health check passes. |
+| `running (readiness unverified)` | Running with no health check. DevDock can show the container is alive, not that the service is serving. |
+| `starting` | Running; the health check has not passed yet. |
+| `unhealthy` | Running; the health check is failing. |
+| `stopped` | The container exists but is not running. The exit code is shown when known. |
+| `missing` | Declared in the Compose file; no DevDock-managed container exists. |
+| `unknown` | The runtime reported a state DevDock does not model. |
+
+Services are listed in declared order, one row per container when a service has replicas, followed by any DevDock-managed containers no longer declared in the current Compose file. Runtime-reported containers DevDock cannot prove it created are ignored and counted in a note. Resources under the project name that fail the ownership rules are listed separately as not managed.
+
+Exit code is `0` when the report is complete and `1` when a required input is missing or any runtime query failed; a partial table is still printed in that case. Readiness does not affect the exit code yet; scripts should wait for the planned machine-readable output rather than parse this table.
+
 ## Ownership scope
 
 Lifecycle commands (planned) act only on Compose resources DevDock can prove it created. `inspect` already prints the Compose project name DevDock derives for a profile so the resources are recognizable in `docker ps`.
@@ -97,7 +121,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
-| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_DAEMON_UNAVAILABLE`, `UP_TIMED_OUT`, `UP_FAILED` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
+| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `STATUS_DAEMON_UNAVAILABLE` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
 | Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
 
 Codes are illustrative and not exhaustive; the `code` field in source is authoritative. Existing codes should not be repurposed for different failure meanings.

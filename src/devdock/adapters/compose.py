@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -15,8 +16,12 @@ from devdock.adapters.base import (
     ConfigValidation,
     ContainerRecord,
     DaemonState,
+    DeclaredServices,
     NetworkRecord,
+    PublishedPort,
     ResourceInventory,
+    ServiceObservation,
+    ServiceObservations,
     StartOutcome,
 )
 
@@ -230,18 +235,8 @@ class ComposeAdapter:
         executable = self._locate("docker")
         if executable is None:
             return StartOutcome("unavailable")
-        args = [
-            executable,
-            "compose",
-            "--project-directory",
-            str(project_root),
-            "--file",
-            str(compose_file),
-            "--project-name",
-            project_name,
-            "up",
-            "--detach",
-        ]
+        args = self._project_args(executable, project_name, project_root, compose_file)
+        args += ["up", "--detach"]
         try:
             result = self._runner(args, cwd=project_root, timeout=timeout)
         except subprocess.TimeoutExpired as expired:
@@ -258,6 +253,149 @@ class ComposeAdapter:
             raw_stdout=result.stdout,
             raw_stderr=result.stderr,
         )
+
+    def _project_args(
+        self, executable: str, project_name: str, project_root: Path, compose_file: Path
+    ) -> list[str]:
+        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
+            raise ValueError(f"project name is not filter-safe: {project_name!r}")
+        return [
+            executable,
+            "compose",
+            "--project-directory",
+            str(project_root),
+            "--file",
+            str(compose_file),
+            "--project-name",
+            project_name,
+        ]
+
+    def list_declared_services(
+        self, *, project_root: Path, compose_file: Path
+    ) -> DeclaredServices:
+        """Run ``docker compose config --services``; output is names only."""
+
+        executable = self._locate("docker")
+        if executable is None:
+            return DeclaredServices(error="Docker CLI is not available.")
+        args = [
+            executable,
+            "compose",
+            "--project-directory",
+            str(project_root),
+            "--file",
+            str(compose_file),
+            "config",
+            "--services",
+        ]
+        try:
+            result = self._runner(args, cwd=project_root, timeout=CONFIG_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return DeclaredServices(error="Compose service listing did not complete.")
+        if result.returncode:
+            return DeclaredServices(
+                error=f"Compose service listing failed with exit code {result.returncode}."
+            )
+        names = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+        return DeclaredServices(names=names)
+
+    def observe_services(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+    ) -> ServiceObservations:
+        """Run ``docker compose ps --all --format json`` and keep only safe fields."""
+
+        executable = self._locate("docker")
+        if executable is None:
+            return ServiceObservations(error="Docker CLI is not available.")
+        args = self._project_args(executable, project_name, project_root, compose_file)
+        args += ["ps", "--all", "--no-trunc", "--format", "json"]
+        try:
+            result = self._runner(args, cwd=project_root, timeout=LIST_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return ServiceObservations(error="Service status query did not complete.")
+        if result.returncode:
+            return ServiceObservations(
+                error=f"Service status query failed with exit code {result.returncode}."
+            )
+        return _parse_service_observations(result.stdout)
+
+
+def _parse_service_observations(text: str) -> ServiceObservations:
+    """Accept a JSON array or newline-delimited objects; both exist across Compose versions."""
+
+    stripped = text.strip()
+    if not stripped:
+        return ServiceObservations()
+    raw_items: list[object]
+    try:
+        if stripped.startswith("["):
+            decoded = json.loads(stripped)
+            raw_items = decoded if isinstance(decoded, list) else [decoded]
+        else:
+            raw_items = [json.loads(line) for line in stripped.splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return ServiceObservations(error="Service status output was not valid JSON.")
+
+    items: list[ServiceObservation] = []
+    skipped = 0
+    for raw in raw_items:
+        observation = _parse_observation(raw)
+        if observation is None:
+            skipped += 1
+        else:
+            items.append(observation)
+    return ServiceObservations(items=tuple(items), skipped=skipped)
+
+
+def _parse_observation(raw: object) -> ServiceObservation | None:
+    if not isinstance(raw, dict):
+        return None
+    identifier = raw.get("ID")
+    name = raw.get("Name")
+    service = raw.get("Service")
+    state = raw.get("State")
+    if not all(isinstance(value, str) and value for value in (identifier, name, service, state)):
+        return None
+    health = raw.get("Health")
+    exit_code = raw.get("ExitCode")
+    ports: list[PublishedPort] = []
+    publishers = raw.get("Publishers")
+    if isinstance(publishers, list):
+        for publisher in publishers:
+            port = _parse_publisher(publisher)
+            if port is not None:
+                ports.append(port)
+    return ServiceObservation(
+        id=str(identifier),
+        name=str(name),
+        service=str(service),
+        state=str(state).lower(),
+        health=health.lower() if isinstance(health, str) else "",
+        exit_code=exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+        else None,
+        ports=tuple(sorted(ports, key=lambda item: (item.host_port, item.container_port))),
+    )
+
+
+def _parse_publisher(raw: object) -> PublishedPort | None:
+    if not isinstance(raw, dict):
+        return None
+    published = raw.get("PublishedPort")
+    target = raw.get("TargetPort")
+    if not isinstance(published, int) or not isinstance(target, int) or published <= 0:
+        return None
+    url = raw.get("URL")
+    protocol = raw.get("Protocol")
+    return PublishedPort(
+        host_ip=url if isinstance(url, str) else "",
+        host_port=published,
+        container_port=target,
+        protocol=protocol if isinstance(protocol, str) and protocol else "tcp",
+    )
 
 
 def _parse_container(line: str) -> ContainerRecord:

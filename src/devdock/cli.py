@@ -9,7 +9,7 @@ from devdock.adapters.compose import START_TIMEOUT
 from devdock.config import ProfileError, ProjectProfile, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
-from devdock.lifecycle import LifecycleResult, start_project
+from devdock.lifecycle import LifecycleResult, project_status, start_project
 from devdock.metadata import read_python_metadata
 from devdock.ownership import ownership_scope
 
@@ -147,6 +147,16 @@ def up(
             profile, root, timeout=timeout, show_output=show_output
         )
     )
+
+
+@app.command()
+def status(
+    directory: Annotated[Path, typer.Argument(help="Project directory to report on.")] = Path("."),
+) -> None:
+    """Report state, health, readiness, and published ports for each service."""
+
+    root, profile = _load_project(directory)
+    _render(project_status(profile, root))
 
 
 @app.command()

@@ -152,6 +152,55 @@ class StartOutcome:
         return self.status == "started"
 
 
+@dataclass(frozen=True)
+class PublishedPort:
+    """One host-published port of a container."""
+
+    host_ip: str
+    host_port: int
+    container_port: int
+    protocol: str
+
+    def render(self) -> str:
+        host = self.host_ip or "0.0.0.0"
+        return f"{host}:{self.host_port}->{self.container_port}/{self.protocol}"
+
+
+@dataclass(frozen=True)
+class ServiceObservation:
+    """Runtime-reported state of one service container.
+
+    Only these fields are retained from the runtime's report. Image, command,
+    labels, and anything else that could carry configuration values are
+    discarded at parse time.
+    """
+
+    id: str
+    name: str
+    service: str
+    state: str
+    health: str
+    exit_code: int | None
+    ports: tuple[PublishedPort, ...] = ()
+
+
+@dataclass(frozen=True)
+class ServiceObservations:
+    """All service containers the runtime reported for a project, or why not."""
+
+    items: tuple[ServiceObservation, ...] = ()
+    error: str | None = None
+    skipped: int = 0
+
+
+@dataclass(frozen=True)
+class DeclaredServices:
+    """Service names declared by the project's Compose configuration, or why not."""
+
+    names: tuple[str, ...] = ()
+    error: str | None = None
+
+
 class RuntimeAdapter(Protocol):
     """Inspect-side operations every runtime adapter provides."""
 
@@ -176,4 +225,20 @@ class RuntimeAdapter(Protocol):
         timeout: float,
     ) -> StartOutcome:
         """Start the project's services detached, without waiting for readiness."""
+        ...
+
+    def list_declared_services(
+        self, *, project_root: Path, compose_file: Path
+    ) -> DeclaredServices:
+        """Return service names from the configuration without rendering its values."""
+        ...
+
+    def observe_services(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+    ) -> ServiceObservations:
+        """Report state, health, exit code, and published ports per service container."""
         ...

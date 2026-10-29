@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- `devdock status` reports each declared service's container, state, Compose health, readiness class, and published ports, lists resources DevDock does not own, and distinguishes running from ready.
 - `devdock up` starts a project's Compose services detached after passing diagnostic, Compose-file, runtime, and ownership gates. Captured Docker output is hidden by default, redacted on every path, and shown in full only with `--show-output`.
 - Ownership scope: a deterministic Compose project name per project root, printed by `devdock inspect`, and label-based rules that future lifecycle commands use to refuse resources DevDock did not create.
 - Structured discovery evidence, nested-root reporting, and safe project manifest/Python metadata inspection.

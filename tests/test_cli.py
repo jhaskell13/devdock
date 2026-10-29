@@ -176,3 +176,33 @@ def test_up_rejects_a_non_positive_timeout(tmp_path: Path) -> None:
     result = runner.invoke(app, ["up", str(tmp_path), "--timeout", "0"])
 
     assert result.exit_code != 0
+
+
+def test_status_renders_a_report_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_status(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("STATUS_REPORTED", True, "Status for x.", ("SERVICE  STATE",))
+
+    monkeypatch.setattr(cli, "project_status", fake_status)
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[OK] STATUS_REPORTED" in result.stdout and "SERVICE  STATE" in result.stdout
+
+
+def test_status_without_compose_file_exits_non_zero(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "STATUS_COMPOSE_FILE_MISSING" in result.stderr

@@ -9,7 +9,8 @@ Typer commands
   ├─ init      writes a starter profile
   ├─ inspect   discovers the project root and reports known files
   ├─ check     loads the profile, validates it, and runs diagnostics
-  └─ up        gates on checks and ownership, then starts services detached
+  ├─ up        gates on checks and ownership, then starts services detached
+  └─ status    joins declared services, owned containers, and runtime state
 
 Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
@@ -22,6 +23,11 @@ Runtime adapter (adapters/)
 Lifecycle (lifecycle.py)
   ├─ policy only: every gate runs before the adapter is asked to mutate
   └─ returns redacted display lines and a stable code
+
+Status (status.py)
+  ├─ readiness classes: ready, running, starting, unhealthy, stopped, missing, unknown
+  ├─ classify_readiness(state, health) is the single source of that mapping
+  └─ joins declared order, managed containers, and observations; ignores unproven ones
 
 Redaction (redaction.py)
   └─ replaces known environment values and URL passwords in captured output
@@ -55,6 +61,10 @@ The root YAML object has these fields:
 - `ports`: optional distinct TCP ports to probe on loopback; results are momentary observations.
 
 Unknown fields are rejected so typos do not silently weaken a check. Profile values contain configuration only; credentials remain in the user's local environment.
+
+## Readiness foundation
+
+`status.py` separates *running* from *ready*. Compose health is the only readiness source today and is recorded per row as `readiness_source`, so later TCP and HTTP probes and dependency blocking can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
 
 ## Adapter boundary
 

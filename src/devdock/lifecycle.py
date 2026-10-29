@@ -19,6 +19,7 @@ from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
 from devdock.ownership import assess_ownership, ownership_scope, resolves_inside
 from devdock.redaction import redact, summarize
+from devdock.status import ProjectStatus, build_service_statuses
 
 
 @dataclass(frozen=True)
@@ -178,3 +179,97 @@ def _render_output(
         return tuple(lines)
     tail = summarize(stderr or stdout, environ)
     return tuple(f"  {line}" for line in tail)
+
+
+def project_status(
+    profile: ProjectProfile,
+    root: Path,
+    *,
+    adapter: RuntimeAdapter | None = None,
+) -> LifecycleResult:
+    """Report per-service state, health, readiness, and ports without mutating anything.
+
+    Unlike ``start_project`` this does not run the profile's diagnostics first:
+    a status report is most useful precisely when something is wrong, so only
+    the inputs it needs (a Compose file and a responsive runtime) are required.
+    Ownership conflicts are reported, not treated as a refusal.
+    """
+
+    runtime = ComposeAdapter() if adapter is None else adapter
+    scope = ownership_scope(profile, root)
+    if scope.compose_file is None:
+        return _refusal(
+            "STATUS_COMPOSE_FILE_MISSING",
+            "Cannot report status: no Compose file is configured or discoverable.",
+            (f"Project root: {scope.root}",),
+            "Set compose_file in devdock.yaml or add a conventional Compose filename.",
+        )
+    if not resolves_inside(scope.compose_file, scope.root):
+        return _refusal(
+            "STATUS_COMPOSE_FILE_OUTSIDE_PROJECT",
+            "Cannot report status: the Compose file does not resolve inside the project.",
+            (f"Compose file: {scope.compose_file}",),
+            "Remove the escaping symlink or choose a project-contained Compose file.",
+        )
+    if not scope.compose_file.is_file():
+        return _refusal(
+            "STATUS_COMPOSE_FILE_MISSING",
+            "Cannot report status: the configured Compose file does not exist.",
+            (f"Expected path: {scope.compose_file}",),
+            "Create the file or update compose_file in devdock.yaml.",
+        )
+
+    capabilities = runtime.detect_capabilities()
+    if not capabilities.compose_available:
+        return _refusal(
+            "STATUS_RUNTIME_UNAVAILABLE",
+            "Cannot report status: the Docker Compose CLI is not available.",
+            (),
+            "Install Docker with the Compose plugin, then retry.",
+        )
+    if not capabilities.daemon_available:
+        return _refusal(
+            "STATUS_DAEMON_UNAVAILABLE",
+            "Cannot report status: the Docker daemon did not respond.",
+            (),
+            "Start Docker Desktop or the Docker Engine service and retry.",
+        )
+
+    assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
+    declared = runtime.list_declared_services(
+        project_root=scope.root, compose_file=scope.compose_file
+    )
+    observed = runtime.observe_services(
+        project_name=scope.project_name,
+        project_root=scope.root,
+        compose_file=scope.compose_file,
+    )
+    services, notes = build_service_statuses(declared.names, assessment.managed, observed.items)
+    errors = list(assessment.errors)
+    if declared.error:
+        errors.append(declared.error)
+    if observed.error:
+        errors.append(observed.error)
+    extra_notes = list(notes)
+    if observed.skipped:
+        extra_notes.append(
+            f"{observed.skipped} runtime status entr{'y' if observed.skipped == 1 else 'ies'} "
+            "could not be parsed and were ignored."
+        )
+    report = ProjectStatus(
+        scope=scope,
+        services=services,
+        conflicts=assessment.conflicts,
+        errors=tuple(errors),
+        notes=tuple(extra_notes),
+    )
+    if not report.complete:
+        return LifecycleResult(
+            "STATUS_INCOMPLETE",
+            False,
+            "Status report is incomplete; some runtime queries failed.",
+            report.explain(),
+            "Retry; if it persists, run the docker commands above by hand to see the error.",
+        )
+    return LifecycleResult("STATUS_REPORTED", True, f"Status for {scope.project_name}.",
+                           report.explain())

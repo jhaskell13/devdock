@@ -5,11 +5,15 @@ import pytest
 from devdock.adapters import (
     ComposeCapabilities,
     ContainerRecord,
+    DeclaredServices,
+    PublishedPort,
     ResourceInventory,
+    ServiceObservation,
+    ServiceObservations,
     StartOutcome,
 )
 from devdock.config import ProjectProfile
-from devdock.lifecycle import start_project
+from devdock.lifecycle import project_status, start_project
 from devdock.ownership import derive_project_name, ownership_scope
 
 READY = ComposeCapabilities(
@@ -313,3 +317,145 @@ def test_show_output_cannot_be_used_to_disable_redaction(tmp_path: Path) -> None
     )
 
     assert "secret-value-here" not in "\n".join(shown.lines)
+
+
+# --- status ----------------------------------------------------------------
+
+
+DEFAULT_DECLARED = DeclaredServices(("web", "db"))
+NO_OBSERVATIONS = ServiceObservations()
+
+
+class StatusAdapter(FakeAdapter):
+    def __init__(
+        self,
+        *,
+        declared: DeclaredServices = DEFAULT_DECLARED,
+        observed: ServiceObservations = NO_OBSERVATIONS,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._declared = declared
+        self._observed = observed
+        self.observe_calls: list[str] = []
+
+    def list_declared_services(self, *, project_root: Path, compose_file: Path) -> DeclaredServices:
+        return self._declared
+
+    def observe_services(
+        self, *, project_name: str, project_root: Path, compose_file: Path
+    ) -> ServiceObservations:
+        self.observe_calls.append(project_name)
+        return self._observed
+
+
+def managed(  # type: ignore[no-untyped-def]
+    scope, name: str, service: str, state: str = "running", identifier: str = ""
+) -> ContainerRecord:
+    return ContainerRecord(
+        id=identifier or f"id-{name}", name=name, state=state, project=scope.project_name,
+        working_dir=str(scope.root), config_files=str(scope.compose_file), service=service,
+        oneoff="False",
+    )
+
+
+def test_status_reports_declared_managed_and_observed_services(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    web = managed(scope, f"{scope.project_name}-web-1", "web")
+    adapter = StatusAdapter(
+        inventory=ResourceInventory(scope.project_name, containers=(web,)),
+        observed=ServiceObservations(
+            items=(
+                ServiceObservation(
+                    web.id, web.name, "web", "running", "healthy", 0,
+                    (PublishedPort("0.0.0.0", 8080, 80, "tcp"),),
+                ),
+            )
+        ),
+    )
+
+    result = project_status(profile(), root, adapter=adapter)
+    text = "\n".join(result.lines)
+
+    assert result.ok and result.code == "STATUS_REPORTED"
+    assert "0.0.0.0:8080->80/tcp" in text
+    assert "Summary: 1 missing, 1 ready." in text
+    assert adapter.observe_calls == [scope.project_name]
+    assert adapter.starts == []
+
+
+def test_status_does_not_require_profile_checks_to_pass(tmp_path: Path) -> None:
+    result = project_status(
+        profile(required_env=["ABSENT_VARIABLE"]), make_project(tmp_path), adapter=StatusAdapter()
+    )
+
+    assert result.ok
+
+
+def test_status_reports_conflicts_instead_of_refusing(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    squatter = ContainerRecord(id="q", name=f"{scope.project_name}-web-1", state="running")
+    adapter = StatusAdapter(
+        inventory=ResourceInventory(scope.project_name, containers=(squatter,))
+    )
+
+    result = project_status(profile(), root, adapter=adapter)
+    text = "\n".join(result.lines)
+
+    assert result.ok
+    assert "Not managed by DevDock (1)" in text
+    assert "web" in text and "missing" in text
+
+
+def test_status_is_incomplete_when_any_query_fails(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = StatusAdapter(
+        inventory=ResourceInventory(scope.project_name, errors=("Volume query failed.",)),
+        observed=ServiceObservations(error="Service status query failed with exit code 1."),
+    )
+
+    result = project_status(profile(), root, adapter=adapter)
+    text = "\n".join(result.lines)
+
+    assert not result.ok and result.code == "STATUS_INCOMPLETE"
+    assert "Incomplete: Volume query failed." in text
+    assert "Incomplete: Service status query failed" in text
+    assert "SERVICE" in text  # partial table is still shown
+
+
+def test_status_notes_skipped_runtime_entries(tmp_path: Path) -> None:
+    adapter = StatusAdapter(observed=ServiceObservations(skipped=2))
+
+    result = project_status(profile(), make_project(tmp_path), adapter=adapter)
+
+    assert result.ok
+    assert any("2 runtime status entries could not be parsed" in line for line in result.lines)
+
+
+def test_status_requires_a_compose_file(tmp_path: Path) -> None:
+    result = project_status(profile(), tmp_path, adapter=StatusAdapter())
+
+    assert result.code == "STATUS_COMPOSE_FILE_MISSING"
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        (ComposeCapabilities(executable=None, compose_cli="missing"), "STATUS_RUNTIME_UNAVAILABLE"),
+        (
+            ComposeCapabilities(executable="docker", compose_cli="available", daemon="unavailable"),
+            "STATUS_DAEMON_UNAVAILABLE",
+        ),
+    ],
+)
+def test_status_needs_a_responsive_runtime(
+    tmp_path: Path, capabilities: ComposeCapabilities, expected: str
+) -> None:
+    adapter = StatusAdapter(capabilities=capabilities)
+
+    result = project_status(profile(), make_project(tmp_path), adapter=adapter)
+
+    assert result.code == expected and adapter.observe_calls == []

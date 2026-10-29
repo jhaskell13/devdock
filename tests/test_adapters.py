@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from devdock.adapters import CommandResult, ComposeAdapter, NetworkRecord, run_command
+from devdock.adapters import (
+    CommandResult,
+    ComposeAdapter,
+    NetworkRecord,
+    PublishedPort,
+    ServiceObservation,
+    run_command,
+)
 from devdock.config import ProjectProfile
 from devdock.diagnostics import check_profile
 
@@ -343,3 +350,132 @@ def test_start_rejects_an_unsafe_project_name_before_running_anything(tmp_path: 
             timeout=5,
         )
     assert runner.calls == []
+
+
+# --- declared services and observations ------------------------------------
+
+
+def test_declared_services_are_read_from_compose_config_services(tmp_path: Path) -> None:
+    runner = RecordingRunner([CommandResult(0, "web\ndb\n\n", "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    declared = adapter.list_declared_services(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.names == ("web", "db") and declared.error is None
+    args = runner.calls[0][0]
+    assert args[-2:] == ["config", "--services"]
+    assert "--quiet" not in args and "--project-name" not in args
+
+
+def test_declared_services_failure_is_reported_without_output(tmp_path: Path) -> None:
+    runner = RecordingRunner([CommandResult(1, "", "SECRET=leak invalid")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    declared = adapter.list_declared_services(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.names == () and declared.error is not None
+    assert "exit code 1" in declared.error and "SECRET" not in repr(declared)
+
+
+def observing(payload: CommandResult | BaseException) -> ComposeAdapter:
+    return ComposeAdapter(RecordingRunner([payload]), locate=lambda _: "docker")
+
+
+def observe(adapter: ComposeAdapter, tmp_path: Path):  # type: ignore[no-untyped-def]
+    return adapter.observe_services(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+    )
+
+
+def test_observe_services_uses_project_scoped_compose_ps_json(tmp_path: Path) -> None:
+    runner = RecordingRunner([CommandResult(0, "[]", "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    result = observe(adapter, tmp_path)
+
+    assert result.items == () and result.error is None
+    args = runner.calls[0][0]
+    assert args[:2] == ["docker", "compose"]
+    assert args[args.index("--project-name") + 1] == "devdock-s-0123456789ab"
+    assert args[-5:] == ["ps", "--all", "--no-trunc", "--format", "json"]
+
+
+ENTRY = (
+    '{"ID":"abc","Name":"p-web-1","Service":"web","State":"running","Health":"healthy",'
+    '"ExitCode":0,"Image":"private/registry:tag","Command":"serve --token=SECRET123",'
+    '"Labels":"com.example.secret=LEAKED,other=x",'
+    '"Publishers":[{"URL":"0.0.0.0","TargetPort":80,"PublishedPort":8080,"Protocol":"tcp"},'
+    '{"URL":"","TargetPort":9000,"PublishedPort":0,"Protocol":"tcp"}]}'
+)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        f"[{ENTRY}]",
+        f"{ENTRY}\n",
+        f"{ENTRY}\n{ENTRY.replace('abc', 'def').replace('web-1', 'web-2')}\n",
+    ],
+    ids=["json-array", "ndjson-single", "ndjson-multiple"],
+)
+def test_observe_services_parses_both_compose_output_shapes(
+    tmp_path: Path, payload: str
+) -> None:
+    adapter = observing(CommandResult(0, payload, ""))
+
+    result = observe(adapter, tmp_path)
+
+    first = result.items[0]
+    assert first.id == "abc" and first.service == "web"
+    assert first.state == "running" and first.health == "healthy" and first.exit_code == 0
+    assert first.ports == (PublishedPort("0.0.0.0", 8080, 80, "tcp"),)
+
+
+def test_observe_services_discards_image_command_and_labels(tmp_path: Path) -> None:
+    adapter = observing(CommandResult(0, ENTRY, ""))
+
+    result = observe(adapter, tmp_path)
+
+    rendered = repr(result)
+    assert "SECRET123" not in rendered and "LEAKED" not in rendered
+    assert "private/registry" not in rendered
+    assert set(ServiceObservation.__dataclass_fields__) == {
+        "id", "name", "service", "state", "health", "exit_code", "ports",
+    }
+
+
+def test_observe_services_skips_malformed_entries_and_counts_them(tmp_path: Path) -> None:
+    payload = f'{ENTRY}\n{{"Name":"no-id"}}\n[1,2]\n'
+    adapter = observing(CommandResult(0, payload, ""))
+
+    result = observe(adapter, tmp_path)
+
+    assert len(result.items) == 1 and result.skipped == 2 and result.error is None
+
+
+def test_observe_services_reports_invalid_json_and_failures(tmp_path: Path) -> None:
+    invalid = observing(CommandResult(0, "{not json", ""))
+    failed = observing(CommandResult(1, "", "boom"))
+    timed_out = observing(subprocess.TimeoutExpired(["docker"], 10))
+
+    assert observe(invalid, tmp_path).error == "Service status output was not valid JSON."
+    assert "exit code 1" in (observe(failed, tmp_path).error or "")
+    assert "did not complete" in (observe(timed_out, tmp_path).error or "")
+
+
+def test_observe_services_tolerates_missing_health_exit_code_and_publishers(
+    tmp_path: Path,
+) -> None:
+    payload = '{"ID":"x","Name":"p-db-1","Service":"db","State":"Exited","ExitCode":true}'
+    adapter = observing(CommandResult(0, payload, ""))
+
+    item = observe(adapter, tmp_path).items[0]
+
+    assert item.state == "exited" and item.health == "" and item.exit_code is None
+    assert item.ports == ()

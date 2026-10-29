@@ -6,9 +6,13 @@ from devdock.adapters.base import (
     ComposeCapabilities,
     ConfigValidation,
     ContainerRecord,
+    DeclaredServices,
     NetworkRecord,
+    PublishedPort,
     ResourceInventory,
     RuntimeAdapter,
+    ServiceObservation,
+    ServiceObservations,
     StartOutcome,
 )
 from devdock.adapters.compose import ComposeAdapter, run_command
@@ -20,9 +24,13 @@ __all__ = [
     "ComposeCapabilities",
     "ConfigValidation",
     "ContainerRecord",
+    "DeclaredServices",
     "NetworkRecord",
+    "PublishedPort",
     "ResourceInventory",
     "RuntimeAdapter",
+    "ServiceObservation",
+    "ServiceObservations",
     "StartOutcome",
     "run_command",
 ]
