@@ -86,10 +86,3 @@ def discover_project_result(start: Path) -> DiscoveryResult:
     )
     files = tuple(name for name in PROJECT_FILES if (root / name).is_file())
     return DiscoveryResult(resolved_start, root, matched, ancestors, files)
-
-
-def discover_project(start: Path) -> Path:
-    """Find the nearest parent containing a DevDock profile or Compose file."""
-
-    return discover_project_result(start).root
-

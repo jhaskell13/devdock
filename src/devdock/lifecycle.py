@@ -413,13 +413,13 @@ def execute_stop(
     runtime = ComposeAdapter() if adapter is None else adapter
     env = os.environ if environ is None else environ
     scope = plan.scope
-    assert scope.compose_file is not None  # plan_stop guarantees this
+    if scope.compose_file is None:  # plan_stop never produces this; guard the public API
+        raise ValueError("a stop plan requires a Compose file")
     if plan.nothing_to_do:
         return LifecycleResult(
             "DOWN_NOTHING_TO_STOP",
             True,
-            f"Nothing to stop for {scope.project_name}.",
-            plan.explain(),
+            f"Nothing to stop for {scope.project_name}; volumes, if any, are untouched.",
         )
 
     outcome = runtime.stop(

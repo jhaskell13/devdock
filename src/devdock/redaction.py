@@ -21,6 +21,11 @@ MIN_REDACTABLE_LENGTH = 4
 MAX_SUMMARY_LINES = 20
 PLACEHOLDER = "[redacted]"
 
+# C0/C1 control characters and DEL, except horizontal tab. These include the
+# ESC that starts ANSI sequences, so stripping them neutralizes terminal
+# escape injection from untrusted names and labels.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")
+
 # scheme://user:password@host -> the password component only.
 _URL_CREDENTIALS = re.compile(r"(?P<prefix>[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@]+:)[^\s@]+@")
 
@@ -68,3 +73,15 @@ def summarize(
     return (f"... {hidden} earlier line(s) hidden; use --show-output for all of it.",) + tuple(
         lines[-max_lines:]
     )
+
+
+def sanitize(text: str) -> str:
+    """Neutralize control characters so untrusted strings are safe to print.
+
+    Container names, labels, and runtime JSON fields come from the Docker
+    daemon and can be set by any local tool. A control character in one of
+    them could rewrite or hide terminal output, so they are replaced with
+    ``?`` before display. Tabs are kept for alignment.
+    """
+
+    return _CONTROL_CHARACTERS.sub("?", text)

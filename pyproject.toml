@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devdock"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A local development environment manager"
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,9 @@ devdock = "devdock.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "devdock.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

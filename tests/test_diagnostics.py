@@ -21,7 +21,7 @@ def test_unsupported_runtime_is_actionable(tmp_path: Path) -> None:
 
     findings = check_profile(profile, tmp_path)
 
-    assert any(finding.level == "FAIL" and "ruby" in finding.message for finding in findings)
+    assert any(finding.severity == "FAIL" and "ruby" in finding.summary for finding in findings)
 
 
 def test_unsupported_python_requirement_does_not_echo_configured_value(
@@ -66,7 +66,7 @@ def test_missing_compose_file_is_reported(tmp_path: Path) -> None:
     findings = check_profile(profile, tmp_path)
 
     assert any(
-        finding.level == "FAIL" and "Compose file not found" in finding.message
+        finding.severity == "FAIL" and "Compose file not found" in finding.summary
         for finding in findings
     )
 

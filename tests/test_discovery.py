@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from devdock.discovery import discover_project, discover_project_result
+from devdock.discovery import discover_project_result
 
 
 def test_selects_nearest_matching_ancestor(tmp_path: Path) -> None:
@@ -14,14 +14,14 @@ def test_selects_nearest_matching_ancestor(tmp_path: Path) -> None:
     nested = project / "src" / "package"
     nested.mkdir(parents=True)
 
-    assert discover_project(nested) == project.resolve()
+    assert discover_project_result(nested).root == project.resolve()
 
 
 def test_uses_start_directory_when_no_marker_exists(tmp_path: Path) -> None:
     nested = tmp_path / "unmarked" / "folder"
     nested.mkdir(parents=True)
 
-    assert discover_project(nested) == nested.resolve()
+    assert discover_project_result(nested).root == nested.resolve()
 
 
 def test_result_exposes_selected_evidence_inventory_and_nested_roots(tmp_path: Path) -> None:

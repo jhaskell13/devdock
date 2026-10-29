@@ -31,18 +31,6 @@ class Finding:
     remedy: str | None = None
     doc_ref: str | None = None
 
-    @property
-    def level(self) -> Severity:
-        """Compatibility name used by the current CLI renderer."""
-
-        return self.severity
-
-    @property
-    def message(self) -> str:
-        """Compatibility name used by callers expecting the old finding shape."""
-
-        return self.summary
-
 
 def _finding(
     code: str,
@@ -83,11 +71,63 @@ def _project_python_interpreters(root: Path) -> tuple[Path, ...]:
     return tuple(Path(os.path.abspath(path)) for path in candidates)
 
 
+def _check_compose_file(
+    profile: ProjectProfile, root: Path, findings: list[Finding]
+) -> Path | None:
+    """Report the Compose file's presence and containment; return it only when usable."""
+
+    compose_path = compose_path_for(profile, root)
+    docker_declared = "docker" in profile.runtimes
+    if compose_path is None:
+        if docker_declared:
+            findings.append(
+                _finding(
+                    "COMPOSE_FILE_MISSING",
+                    "FAIL",
+                    "No Compose file was configured or discovered.",
+                    remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
+                )
+            )
+        return None
+    if not resolves_inside(compose_path, root):
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_OUTSIDE_PROJECT",
+                "FAIL",
+                "Compose file does not resolve inside the selected project.",
+                evidence=(f"File: {compose_path}",),
+                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
+            )
+        )
+        return None
+    if not compose_path.is_file():
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_MISSING",
+                "FAIL",
+                f"Compose file not found: {compose_path.name}",
+                evidence=(f"Expected path: {compose_path}",),
+                remedy="Create the file or update compose_file in devdock.yaml.",
+            )
+        )
+        return None
+    findings.append(
+        _finding(
+            "COMPOSE_FILE_FOUND",
+            "PASS",
+            f"Compose file found: {compose_path.name}",
+            evidence=(f"Path: {compose_path}",),
+        )
+    )
+    return compose_path
+
+
 def _check_compose(
     profile: ProjectProfile,
     root: Path,
     findings: list[Finding],
     adapter: RuntimeAdapter,
+    compose_path: Path | None,
 ) -> None:
     requirement = profile.runtimes.get("docker")
     if requirement is None:
@@ -109,40 +149,6 @@ def _check_compose(
             )
         )
         return
-
-    compose_path = compose_path_for(profile, root)
-    compose_file_ready = False
-    if compose_path is None:
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                "No Compose file was configured or discovered.",
-                remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
-            )
-        )
-    elif not resolves_inside(compose_path, root):
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_OUTSIDE_PROJECT",
-                "FAIL",
-                "Compose file does not resolve inside the selected project.",
-                evidence=(f"File: {compose_path}",),
-                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
-            )
-        )
-    elif not compose_path.is_file():
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                f"Compose file not found: {compose_path.name}",
-                evidence=(f"Expected path: {compose_path}",),
-                remedy="Create the file or update compose_file in devdock.yaml.",
-            )
-        )
-    else:
-        compose_file_ready = True
 
     capabilities = adapter.detect_capabilities()
     executable = capabilities.executable
@@ -229,7 +235,7 @@ def _check_compose(
             )
         )
 
-    if not compose_file_ready or compose_path is None:
+    if compose_path is None:
         findings.append(
             _compose_skipped(
                 "COMPOSE_CONFIG_SKIPPED",
@@ -401,39 +407,8 @@ def check_profile(
                 )
             )
 
-    _check_compose(profile, root, findings, compose_adapter)
-
-    if profile.compose_file is not None and "docker" not in profile.runtimes:
-        compose_path = root / profile.compose_file
-        if not resolves_inside(compose_path, root):
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_OUTSIDE_PROJECT",
-                    "FAIL",
-                    "Compose file does not resolve inside the selected project.",
-                    evidence=(f"File: {compose_path}",),
-                    remedy="Remove the escaping symlink or choose a project-contained "
-                    "Compose file.",
-                )
-            )
-        elif compose_path.is_file():
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_FOUND",
-                    "PASS",
-                    f"Compose file found: {profile.compose_file}",
-                    evidence=(f"Path: {compose_path}",),
-                )
-            )
-        else:
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_MISSING",
-                    "FAIL",
-                    f"Compose file not found: {profile.compose_file}",
-                    remedy="Create the file or update compose_file in devdock.yaml.",
-                )
-            )
+    compose_path = _check_compose_file(profile, root, findings)
+    _check_compose(profile, root, findings, compose_adapter, compose_path)
 
     for name in profile.required_env:
         if name not in env:

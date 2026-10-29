@@ -61,3 +61,10 @@ def test_summary_drops_blank_lines_and_redacts() -> None:
     lines = summarize("\n\nfailed with hunter2-very-secret\n\n", {"PW": "hunter2-very-secret"})
 
     assert lines == ("failed with ${PW}",)
+
+
+def test_sanitize_strips_escapes_and_controls_but_keeps_tabs() -> None:
+    from devdock.redaction import sanitize
+
+    assert sanitize("a\tb\x1b[31mred\x00\x7f\x9b") == "a\tb?[31mred???"
+    assert sanitize("plain") == "plain"

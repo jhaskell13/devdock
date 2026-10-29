@@ -185,7 +185,9 @@ def test_compose_file_escaping_the_project_blocks_the_start(
 
     result = start_project(profile(), root, adapter=adapter, environ={})
 
-    assert result.code == "UP_COMPOSE_FILE_OUTSIDE_PROJECT"
+    # Preflight diagnostics catch this first; the dedicated gate remains as defense in depth.
+    assert result.code == "UP_PREFLIGHT_FAILED"
+    assert any("COMPOSE_FILE_OUTSIDE_PROJECT" in line for line in result.lines)
     assert adapter.starts == []
 
 
@@ -656,7 +658,8 @@ def test_execute_with_nothing_to_do_is_idempotent_and_runs_no_command(tmp_path: 
     assert first.ok and first.code == "DOWN_NOTHING_TO_STOP"
     assert second.code == first.code
     assert adapter.stops == []
-    assert any("Will preserve 1 volume(s)" in line for line in first.lines)
+    assert first.lines == ()  # the CLI already printed the plan
+    assert any("Will preserve 1 volume(s)" in line for line in plan.explain())
 
 
 def test_execute_redacts_runtime_output_on_failure(tmp_path: Path) -> None:

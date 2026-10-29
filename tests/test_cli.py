@@ -329,3 +329,30 @@ def test_down_refusal_from_planning_is_rendered(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "DOWN_COMPOSE_FILE_MISSING" in result.stderr
+
+
+def test_version_flag_reports_the_package_version() -> None:
+    from devdock import __version__
+
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"devdock {__version__}"
+
+
+def test_output_neutralizes_control_characters_from_runtime_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    hostile = "web\x1b[2J\x1b[H\x07 hidden\r\nfake [OK] line"
+
+    def fake_status(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("STATUS_REPORTED", True, "Status.", (hostile,))
+
+    monkeypatch.setattr(cli, "project_status", fake_status)
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert "\x1b" not in result.stdout and "\x07" not in result.stdout
+    assert "\r" not in result.stdout
+    assert "web?[2J?[H? hidden??fake [OK] line" in result.stdout
