@@ -70,11 +70,36 @@ DevDock then runs `docker compose --project-directory <root> --file <compose fil
 
 Repeating `up` with resources already running is safe; Compose reconciles to the same state and the ownership gate still passes because the resources are DevDock's.
 
+### Failure classification
+
+When a start or stop fails, DevDock reads the runtime's message to recognize *which kind* of failure it was, then discards the text. The code, summary, and suggested action are written in DevDock's own words and never quote the output, so classification cannot become a disclosure channel.
+
+| Kind | Codes | Typical cause |
+| --- | --- | --- |
+| Permission | `UP_PERMISSION_DENIED`, `DOWN_PERMISSION_DENIED` | The user cannot reach the Docker socket. |
+| Daemon | `UP_DAEMON_UNAVAILABLE`, `DOWN_DAEMON_UNAVAILABLE` | The daemon stopped responding mid-operation. |
+| Configuration | `UP_CONFIG_INVALID` | Compose rejected the file during the run. |
+| Registry auth | `UP_REGISTRY_AUTH_REQUIRED` | The registry needs `docker login`. |
+| Image | `UP_IMAGE_NOT_FOUND` | The image or tag does not exist. |
+| Pull | `UP_PULL_FAILED` | Network, proxy, or rate-limit failure while downloading. |
+| Ports | `UP_PORT_CONFLICT` | A published port is already bound. |
+| Networks | `UP_NETWORK_CONFLICT` | A network exists or an address pool overlaps. |
+| Host resources | `UP_RESOURCE_EXHAUSTED` | Out of disk space, memory, or file handles. |
+| In use | `DOWN_RESOURCE_IN_USE` | A network or volume is still attached. |
+| Service | `UP_SERVICE_FAILED` | A container exited or a dependency never became healthy. |
+| Unrecognized | `UP_FAILED`, `DOWN_FAILED` | DevDock does not recognize the message. |
+
+Every result states the runtime's exit code and whether the message was recognized, so an unrecognized failure is visibly unrecognized rather than silently mislabelled.
+
 ### Runtime output and redaction
 
-On success, captured Docker output is not shown. On failure DevDock prints the last 20 meaningful lines of it after redaction; `--show-output` prints all of both streams, also redacted. `--show-output` controls volume, never redaction.
+On success, captured Docker output is not shown. When a failure is *recognized*, its output is also withheld: the code and suggested action already say what to do, and showing the text would risk disclosing values DevDock cannot recognize for no diagnostic gain. When a failure is *unrecognized*, DevDock prints the last 20 meaningful lines after redaction, because that is the only information available. `--show-output` prints all of both streams in either case, also redacted. `--show-output` controls volume, never redaction.
 
 Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, except a short list of well-known non-secret variables such as `PATH`, `TERM`, `LANG`, and `LC_*`; `HOME` and `USER` are treated as private and redacted. Passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`. Values are matched in one pass, longest first, so a short value cannot rewrite another value's placeholder.
+
+A second layer matches credentials by shape rather than by value, so it catches secrets DevDock has never seen — including values Compose read from the project's `.env`. It covers private key blocks, JWTs, AWS key IDs, GitHub and Slack tokens, `sk-` style API keys, `Bearer` headers, and `key=value` pairs whose key names a secret such as `POSTGRES_PASSWORD` or `api_key`. The key is kept and the value replaced, so the message still explains what went wrong.
+
+Neither layer is a guarantee. A secret with no recognizable shape, not present in DevDock's environment, and not in a named assignment can still appear in output. Redaction also scans at most 256 KB; beyond that the output is truncated first.
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env` file, which DevDock never opens, so a value that exists only there cannot be recognized and could appear in output. Treat `--show-output` as a deliberate disclosure and review what you paste elsewhere.
 
@@ -148,6 +173,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
+| Lifecycle failures | `UP_PORT_CONFLICT`, `UP_IMAGE_NOT_FOUND`, `UP_REGISTRY_AUTH_REQUIRED`, `UP_PULL_FAILED`, `UP_CONFIG_INVALID`, `UP_SERVICE_FAILED`, `UP_RESOURCE_EXHAUSTED`, `DOWN_RESOURCE_IN_USE` | The recognized kind of a failed start or stop. Output is withheld because the code already explains it. |
 | Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `DOWN_STOPPED`, `DOWN_PARTIAL`, `DOWN_PLAN_STALE`, `DOWN_CONFIRMATION_REQUIRED`, `DOWN_OWNERSHIP_CONFLICT` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
 | Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
 

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve DevDock. The project is early and its command and profile formats may still change, so open an issue or discussion before making large or compatibility-sensitive changes.
+Thanks for helping improve DevDock. By participating you agree to the [code of conduct](CODE_OF_CONDUCT.md). The project is early and its command and profile formats may still change, so open an issue or discussion before making large or compatibility-sensitive changes.
 
 ## Development setup
 

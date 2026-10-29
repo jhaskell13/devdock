@@ -57,7 +57,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 2. Docker Compose adapter and lifecycle
 
-**Status:** In progress. The adapter boundary, ownership model, and `up`, `status`, and `down` commands are implemented and unit-tested with fake runners; no live daemon is required. Remaining: a finer error taxonomy for start failures and a separately gated disposable integration suite.
+**Status:** In progress. The adapter boundary, ownership model, `up`, `status`, and `down`, and the failure taxonomy are implemented and unit-tested with fake runners; no live daemon is required. Remaining: a separately gated disposable integration suite, which is also where the Compose label and JSON field names get confirmed against a real daemon.
 
 - [x] Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
 - [x] Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
@@ -67,7 +67,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 - [x] Implement `devdock down` as a scoped stop operation with a preview of affected services.
 - [x] Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations. (DevDock controls project name, directory, and file; nothing passes through in this version.)
 - [x] Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
-- [ ] Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
+- [x] Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
 - [ ] Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
 - [ ] Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects. (Idempotence is unit-tested; the unrelated-project check needs the integration suite.)
 

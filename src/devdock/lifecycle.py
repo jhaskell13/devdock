@@ -17,6 +17,7 @@ from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, Run
 from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
 from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
+from devdock.failures import FailureExplanation, classify_failure
 from devdock.ownership import (
     OwnershipAssessment,
     OwnershipScope,
@@ -140,12 +141,20 @@ def start_project(
             "the docker ps command above.",
         )
     if outcome.status == "failed":
+        failure = classify_failure("UP", outcome.raw_stdout, outcome.raw_stderr)
         return _refusal(
-            "UP_FAILED",
-            f"Docker Compose could not start the project (exit code {outcome.returncode}).",
-            preview + captured,
-            "Correct the error reported above, then retry. Use --show-output for the full "
-            "runtime output.",
+            failure.code,
+            f"Could not start {scope.project_name}: {failure.summary}",
+            preview
+            + _failure_lines(failure, outcome.returncode)
+            + _render_output(
+                outcome.raw_stdout,
+                outcome.raw_stderr,
+                env,
+                show_output,
+                recognized=failure.recognized,
+            ),
+            failure.remedy,
         )
     return LifecycleResult(
         "UP_STARTED",
@@ -165,8 +174,15 @@ def _render_output(
     stderr: str,
     environ: Mapping[str, str],
     show_output: bool,
+    *,
+    recognized: bool = False,
 ) -> tuple[str, ...]:
-    """Return redacted runtime output: everything on request, otherwise a tail."""
+    """Return redacted runtime output, scaled to how much the caller still needs.
+
+    A recognized failure already carries a precise summary and remedy, so its
+    output is withheld unless asked for: showing it would risk disclosing
+    values DevDock cannot recognize for no diagnostic gain.
+    """
 
     if show_output:
         lines: list[str] = []
@@ -181,6 +197,8 @@ def _render_output(
                 "read by Compose from the project's .env cannot be recognized."
             )
         return tuple(lines)
+    if recognized:
+        return ("Runtime output is hidden; rerun with --show-output to see it.",)
     tail = summarize(stderr or stdout, environ)
     return tuple(f"  {line}" for line in tail)
 
@@ -278,6 +296,13 @@ def project_status(
     return LifecycleResult(
         "STATUS_REPORTED", True, f"Status for {scope.project_name}.", report.explain()
     )
+
+
+def _failure_lines(failure: FailureExplanation, returncode: int | None) -> tuple[str, ...]:
+    """One evidence line naming the exit status and whether DevDock recognized it."""
+
+    recognition = "recognized" if failure.recognized else "not recognized by DevDock"
+    return (f"Runtime exit code: {returncode} ({recognition}).",)
 
 
 @dataclass(frozen=True)
@@ -456,12 +481,19 @@ def execute_stop(
             "Run 'devdock status' to see what remains, then run 'devdock down' again.",
         )
     if outcome.status == "failed":
+        failure = classify_failure("DOWN", outcome.raw_stdout, outcome.raw_stderr)
         return _refusal(
-            "DOWN_FAILED",
-            f"Docker Compose could not stop the project (exit code {outcome.returncode}).",
-            captured,
-            "Correct the error reported above, then retry. Use --show-output for the full "
-            "runtime output.",
+            failure.code,
+            f"Could not stop {scope.project_name}: {failure.summary}",
+            _failure_lines(failure, outcome.returncode)
+            + _render_output(
+                outcome.raw_stdout,
+                outcome.raw_stderr,
+                env,
+                show_output,
+                recognized=failure.recognized,
+            ),
+            failure.remedy,
         )
 
     after = assess_ownership(scope, runtime.list_project_resources(scope.project_name))

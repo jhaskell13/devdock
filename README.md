@@ -155,6 +155,10 @@ The first implementation checks Python minimum versions and Docker Compose avail
 
 Set it in the shell before launching DevDock. The current CLI checks the inherited process environment and intentionally does not parse `.env` files.
 
+## Code of conduct
+
+Participation is covered by the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Contributing and development checks
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the local workflow. From the repository root on Windows, run:

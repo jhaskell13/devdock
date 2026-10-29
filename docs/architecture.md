@@ -31,8 +31,13 @@ Status (status.py)
   ├─ classify_readiness(state, health) is the single source of that mapping
   └─ joins declared order, managed containers, and observations; ignores unproven ones
 
+Failures (failures.py)
+  ├─ literal-substring markers map runtime prose to a stable kind
+  └─ returns only DevDock's own code, summary, and remedy; never quotes output
+
 Redaction (redaction.py)
-  └─ replaces known environment values and URL passwords in captured output
+  ├─ known environment values, then credential shapes, then URL passwords
+  └─ all quantifiers bounded; input capped before scanning
 
 Ownership (ownership.py)
   ├─ deterministic Compose project name: devdock-<slug>-<root digest>

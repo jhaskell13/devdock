@@ -6,6 +6,13 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- Failure taxonomy for `up` and `down`: permission, daemon, configuration, registry auth, image, pull, port, network, host-resource, in-use, and service failures each get a stable code and a specific suggested action. Recognized failures withhold the runtime's output, since the code already explains the problem.
+- Shape-based redaction for credentials DevDock has never seen, including private keys, JWTs, cloud and provider tokens, `Bearer` headers, and secret-named `key=value` pairs.
+- `CODE_OF_CONDUCT.md`.
+
+### Fixed
+
+- Redaction could stall on long runtime output. The URL-credential pattern had an unbounded scheme run and backtracked quadratically; 256 KB of plain text took over a minute. All patterns are now bounded and a regression test asserts linear behavior.
 - Hardening from the Milestone 2 review: Compose runs with `COMPOSE_REMOVE_ORPHANS` pinned off so a project `.env` cannot widen `down`; `down` re-verifies the plan immediately before acting and reports `DOWN_PARTIAL` when it cannot confirm the result; inventory fields are JSON-encoded so labels cannot forge records; profile paths reject control characters; redaction skips well-known non-secret variables and cannot mangle its own placeholders.
 - `devdock --version`. Terminal output neutralizes control characters from container names and runtime data. The package ships a `py.typed` marker.
 - `devdock down` previews, confirms, then stops and removes a project's DevDock-managed containers and networks, re-checks what remains, and never removes volumes. Supports `--dry-run` and `--yes`.

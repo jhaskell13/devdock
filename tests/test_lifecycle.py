@@ -250,7 +250,8 @@ def test_failed_start_summarizes_stderr_and_redacts_it(tmp_path: Path) -> None:
     )
 
     text = "\n".join(result.lines)
-    assert result.code == "UP_FAILED" and "exit code 1" in result.summary
+    assert result.code == "UP_FAILED"  # unrecognized, so the tail is still shown
+    assert "Runtime exit code: 1 (not recognized by DevDock)." in text
     assert "hunter2-very-secret" not in text
     assert "${DB_PASSWORD}" in text
 
@@ -679,7 +680,8 @@ def test_execute_redacts_runtime_output_on_failure(tmp_path: Path) -> None:
     result = execute_stop(plan, adapter=adapter, environ={"PW": "hunter2-very-secret"})
     text = "\n".join(result.lines)
 
-    assert result.code == "DOWN_FAILED" and "exit code 1" in result.summary
+    assert result.code == "DOWN_FAILED"
+    assert "Runtime exit code: 1 (not recognized by DevDock)." in text
     assert "hunter2-very-secret" not in text and "${PW}" in text
 
 
