@@ -109,9 +109,18 @@ _MARKERS: tuple[tuple[FailureKind, tuple[str, ...]], ...] = (
             "error pulling image",
             "tls handshake timeout",
             "i/o timeout",
+            # Go's standard timeout wording, which Docker uses for a registry it
+            # cannot reach. Verified against a real daemon.
+            "context deadline exceeded",
+            "client.timeout exceeded",
             "net/http: request canceled",
             "temporary failure in name resolution",
+            "no such host",
             "no route to host",
+            "connection refused",
+            "dial tcp",
+            "certificate signed by unknown authority",
+            "server gave http response to https client",
             "proxyconnect tcp",
             "toomanyrequests",
             "download failed",

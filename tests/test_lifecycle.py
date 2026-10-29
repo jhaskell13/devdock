@@ -805,3 +805,51 @@ def test_status_and_down_use_the_same_permission_code_family(tmp_path: Path) -> 
 
     assert status.code == "STATUS_PERMISSION_DENIED"
     assert isinstance(plan, LifecycleResult) and plan.code == "DOWN_PERMISSION_DENIED"
+
+
+def test_successful_start_hides_runtime_output_unless_requested(tmp_path: Path) -> None:
+    """DevDock already described what changed; the raw text only adds leak risk."""
+    root = make_project(tmp_path)
+    noisy = OperationOutcome("succeeded", 0, "", "Container web Created\nContainer web Started")
+
+    quiet = start_project(profile(), root, adapter=FakeAdapter(outcome=noisy), environ={})
+    verbose = start_project(
+        profile(), root, adapter=FakeAdapter(outcome=noisy), environ={}, show_output=True
+    )
+
+    assert quiet.ok and "Container web Started" not in "\n".join(quiet.lines)
+    assert "Container web Started" in "\n".join(verbose.lines)
+
+
+def test_successful_stop_hides_runtime_output_unless_requested(tmp_path: Path) -> None:
+    root, _scope, inventory = running_project(tmp_path)
+    noisy = OperationOutcome("succeeded", 0, "", "Container web Removed")
+    adapter = StopAdapter(inventory=inventory, stop_outcome=noisy)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    quiet = execute_stop(plan, adapter=adapter, environ={})
+
+    assert "Container web Removed" not in "\n".join(quiet.lines)
+    assert any("Preserved" in line for line in quiet.lines)
+
+
+def test_advisory_findings_are_not_labelled_as_failures(tmp_path: Path) -> None:
+    """An [OK] result must not contain a line that reads [FAIL]."""
+    root = make_project(tmp_path)
+
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        result = start_project(
+            profile(ports=[held.getsockname()[1]]),
+            root,
+            adapter=FakeAdapter(),
+            environ={},
+        )
+
+    text = "\n".join(result.lines)
+    assert result.ok
+    assert "[FAIL]" not in text
+    assert "[ADVISORY] PORT_UNAVAILABLE" in text
+    assert "did not block this start" in text

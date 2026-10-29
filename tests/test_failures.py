@@ -122,3 +122,50 @@ def test_every_kind_has_a_distinct_code_summary_and_remedy() -> None:
     codes = {item.code for item in explained}
     assert len(codes) == len(SAMPLES)
     assert all(failure.code == "UP_FAILED" for failure in failures)
+
+
+# Captured verbatim from a real Docker daemon (29.9.2) via `docker compose up`.
+# These are the exact strings the taxonomy must keep recognizing.
+OBSERVED: list[tuple[FailureKind, str]] = [
+    (
+        "pull_failed",
+        'Error response from daemon: Get "http://localhost:1/v2/": context deadline exceeded '
+        "(Client.Timeout exceeded while awaiting headers)",
+    ),
+    (
+        "image_not_found",
+        "Error response from daemon: manifest for busybox:devdock-no-such-tag-exists not found: "
+        "manifest unknown: manifest unknown",
+    ),
+    (
+        "permission_denied",
+        "permission denied while trying to connect to the Docker daemon socket at "
+        "unix:///var/run/docker.sock",
+    ),
+]
+
+
+@pytest.mark.parametrize(("expected", "message"), OBSERVED, ids=[k for k, _ in OBSERVED])
+def test_real_daemon_output_is_classified(expected: FailureKind, message: str) -> None:
+    assert classify_failure("UP", "", message).kind == expected
+
+
+def test_an_unreachable_registry_is_a_pull_failure_not_a_missing_image() -> None:
+    """A timeout says nothing about whether the image exists."""
+
+    timeout = 'Get "http://localhost:1/v2/": context deadline exceeded'
+    missing = "manifest for busybox:nope not found: manifest unknown"
+
+    assert classify_failure("UP", "", timeout).kind == "pull_failed"
+    assert classify_failure("UP", "", missing).kind == "image_not_found"
+
+
+def test_daemon_connection_errors_still_outrank_registry_connection_errors() -> None:
+    """A dead daemon mentions connection refused too; it must not look like a pull."""
+
+    daemon = (
+        "Cannot connect to the Docker daemon at tcp://localhost:2375. "
+        "Is the docker daemon running?: dial tcp 127.0.0.1:2375: connection refused"
+    )
+
+    assert classify_failure("UP", "", daemon).kind == "daemon_unavailable"

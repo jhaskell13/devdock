@@ -215,7 +215,14 @@ def test_port_conflict_is_classified_from_real_runtime_output(
     assert "Runtime output is hidden" in detail
 
 
-def test_missing_image_is_classified_from_real_runtime_output(project: Path) -> None:
+def test_unreachable_registry_is_classified_as_a_pull_failure(project: Path) -> None:
+    """A registry that cannot be reached is a pull failure, not a missing image.
+
+    Docker reports this as a Go timeout ("context deadline exceeded"), which is
+    phrasing the taxonomy has to match explicitly. Port 1 is never a registry,
+    so this needs no network access.
+    """
+
     (project / "compose.yaml").write_text(
         "services:\n  ghost:\n    image: localhost:1/devdock-nonexistent:no-such-tag\n",
         encoding="utf-8",
@@ -223,8 +230,26 @@ def test_missing_image_is_classified_from_real_runtime_output(project: Path) -> 
 
     result = start_project(profile_at(project), project, adapter=adapter(), timeout=180)
 
-    assert result.code in {"UP_IMAGE_NOT_FOUND", "UP_PULL_FAILED", "UP_REGISTRY_AUTH_REQUIRED"}
+    detail = f"{result.summary}\n" + "\n".join(result.lines)
     assert not result.ok
+    assert result.code == "UP_PULL_FAILED", detail
+
+
+def test_missing_tag_is_classified_as_image_not_found(project: Path) -> None:
+    """A reachable registry that has no such tag is a missing image."""
+
+    (project / "compose.yaml").write_text(
+        "services:\n  ghost:\n    image: busybox:devdock-no-such-tag-exists\n",
+        encoding="utf-8",
+    )
+
+    result = start_project(profile_at(project), project, adapter=adapter(), timeout=180)
+
+    detail = f"{result.summary}\n" + "\n".join(result.lines)
+    assert not result.ok
+    if result.code == "UP_PULL_FAILED":
+        pytest.skip("The registry was not reachable, so the tag could not be checked.")
+    assert result.code == "UP_IMAGE_NOT_FOUND", detail
 
 
 def test_compose_ps_json_fields_parse_against_the_real_runtime(

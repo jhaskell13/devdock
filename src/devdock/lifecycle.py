@@ -67,10 +67,15 @@ def start_project(
 
     findings: list[Finding] = check_profile(profile, root, environ=env, adapter=runtime)
     advisories = tuple(
-        f"[{item.severity}] {item.code}: {item.summary}"
+        f"[ADVISORY] {item.code}: {item.summary}"
         for item in findings
         if item.severity == "FAIL" and item.code in PREFLIGHT_ADVISORY_CODES
     )
+    if advisories:
+        advisories += (
+            "Advisory findings did not block this start; a port that looks taken is "
+            "usually taken by this project's own services, and Compose's own bind decides.",
+        )
     failures = tuple(
         item
         for item in findings
@@ -184,7 +189,7 @@ def start_project(
         True,
         f"Started {scope.project_name}.",
         preview
-        + captured
+        + _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True)
         + (
             "Services were started but readiness was not verified; a container can be "
             "running without being ready to serve requests.",
@@ -199,12 +204,15 @@ def _render_output(
     show_output: bool,
     *,
     recognized: bool = False,
+    on_success: bool = False,
 ) -> tuple[str, ...]:
     """Return redacted runtime output, scaled to how much the caller still needs.
 
-    A recognized failure already carries a precise summary and remedy, so its
-    output is withheld unless asked for: showing it would risk disclosing
-    values DevDock cannot recognize for no diagnostic gain.
+    A successful operation needs none of it: DevDock has already described what
+    changed in its own words. A recognized failure needs none of it either,
+    because it carries a precise summary and remedy. In both cases showing the
+    text would risk disclosing values DevDock cannot recognize for no
+    diagnostic gain, so it waits behind --show-output.
     """
 
     if show_output:
@@ -220,6 +228,8 @@ def _render_output(
                 "read by Compose from the project's .env cannot be recognized."
             )
         return tuple(lines)
+    if on_success:
+        return ()
     if recognized:
         return ("Runtime output is hidden; rerun with --show-output to see it.",)
     tail = summarize(stderr or stdout, environ)
@@ -534,7 +544,9 @@ def execute_stop(
         )
 
     after = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
-    lines: list[str] = list(captured)
+    lines: list[str] = list(
+        _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True)
+    )
     leftover = tuple(item for item in after.managed if item.id in {a.id for a in plan.affected})
     if leftover:
         lines.append(f"Warning: {len(leftover)} container(s) still exist after down:")
