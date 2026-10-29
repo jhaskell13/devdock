@@ -146,6 +146,10 @@ Exit code is `0` when the report is complete and `1` when a required input is mi
 
 DevDock runs Compose with its own environment plus three pinned settings: `COMPOSE_REMOVE_ORPHANS=false`, `COMPOSE_ANSI=never`, and `COMPOSE_PROGRESS=plain`. Compose reads `COMPOSE_*` settings from the project's `.env`, which DevDock treats as untrusted; shell values take precedence over `.env` in Compose, so these pins keep the `down` preview truthful and the captured output free of colour codes whatever `.env` says. Other `.env` content, including `DOCKER_HOST` or `DOCKER_CONTEXT`, is honoured by Compose exactly as it would be if you ran `docker compose` in that directory yourself; DevDock does not read the file to check.
 
+## Trying the commands
+
+`examples/demo` is a disposable project with two services, one with a health check and one without, plus a named volume. `python scripts/demo.py` runs the full lifecycle against a real daemon and cleans up afterwards.
+
 ## Ownership scope
 
 Lifecycle commands (planned) act only on Compose resources DevDock can prove it created. `inspect` already prints the Compose project name DevDock derives for a profile so the resources are recognizable in `docker ps`.

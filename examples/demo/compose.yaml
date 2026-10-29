@@ -1,0 +1,26 @@
+# A disposable sample project for demonstrating DevDock.
+#
+# It is deliberately varied: one service has a health check so DevDock can
+# report it as "ready", one has none so DevDock must report "running
+# (readiness unverified)", and a named volume exists to show that `devdock
+# down` preserves volumes.
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "18080:80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+      start_period: 1s
+
+  worker:
+    image: busybox:stable
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    volumes:
+      - work-data:/data
+
+volumes:
+  work-data:

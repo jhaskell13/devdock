@@ -1,3 +1,4 @@
+import socket
 from pathlib import Path
 
 import pytest
@@ -742,3 +743,36 @@ def test_execute_does_not_claim_success_when_verification_fails(tmp_path: Path) 
     assert not result.ok and result.code == "DOWN_PARTIAL"
     assert "could not confirm" in result.summary
     assert any("Could not verify" in line for line in result.lines)
+
+
+def test_declared_port_already_in_use_does_not_block_a_repeat_start(tmp_path: Path) -> None:
+    """A published port is usually held by this project's own containers.
+
+    Treating the probe as blocking would make the second `devdock up` refuse,
+    so it is reported as advisory and Compose's own bind stays authoritative.
+    """
+    root = make_project(tmp_path)
+    adapter = FakeAdapter()
+
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        port = held.getsockname()[1]
+        result = start_project(profile(ports=[port]), root, adapter=adapter, environ={})
+
+    assert result.ok and result.code == "UP_STARTED"
+    assert len(adapter.starts) == 1
+    assert any("PORT_UNAVAILABLE" in line for line in result.lines)
+
+
+def test_other_preflight_failures_still_block_a_start(tmp_path: Path) -> None:
+    adapter = FakeAdapter()
+
+    result = start_project(
+        profile(required_env=["ABSENT_VARIABLE"]),
+        make_project(tmp_path),
+        adapter=adapter,
+        environ={},
+    )
+
+    assert result.code == "UP_PREFLIGHT_FAILED" and adapter.starts == []

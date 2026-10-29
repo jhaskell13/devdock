@@ -59,6 +59,12 @@ version = {attr = "devdock.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The Docker suite is deselected by default so an ordinary run never depends on
+# a daemon. Run it explicitly with: pytest -m docker
+addopts = "-m 'not docker'"
+markers = [
+    "docker: requires a reachable Docker daemon and creates disposable local resources",
+]
 
 [tool.ruff]
 line-length = 100

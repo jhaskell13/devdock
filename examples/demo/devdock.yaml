@@ -1,0 +1,9 @@
+schema_version: 1
+project: devdock-demo
+runtimes:
+  docker: compose
+compose_file: compose.yaml
+required_files:
+  - compose.yaml
+ports:
+  - 18080

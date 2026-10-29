@@ -28,6 +28,22 @@ Run the checks from the repository root. On Windows, use the virtual environment
 
 On Linux or macOS, use the equivalent `python -m ...` commands after activating `.venv`. Code is formatted with `ruff format`; run it before committing, or install the optional pre-commit hooks from `.pre-commit-config.yaml`.
 
+### Test suites
+
+The default run never needs Docker:
+
+```
+python -m pytest
+```
+
+The Docker suite is marked `docker` and deselected by default. With a daemon running:
+
+```
+python -m pytest -m docker
+```
+
+It creates only disposable containers, networks, and volumes in a temporary directory, and removes them in fixture teardown, including the volumes DevDock itself preserves. It skips rather than fails when no daemon is reachable. `python scripts/demo.py` runs the same ground as a readable walkthrough.
+
 Add or update tests when behavior changes. Prefer synthetic temporary project directories and fake adapters. Unit tests must not require a running Docker daemon, real credentials, personal data, or access to production systems.
 
 Keep changes focused and make commits that describe one meaningful step. Use the `type(scope): summary` pattern when it fits; common types are `feat`, `fix`, `docs`, `test`, `ci`, and `build`. Update `CHANGELOG.md` under `Unreleased` for user-visible changes, and update the README, CLI contract, architecture notes, or roadmap when behavior or planned scope changes. Do not commit virtual environments, tool caches, build outputs, `.env` files, keys, or generated state.

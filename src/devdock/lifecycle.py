@@ -40,6 +40,13 @@ class LifecycleResult:
     remedy: str | None = None
 
 
+# Port probes are advisory for a start. A port that a diagnostic sees as taken
+# is frequently taken by this project's own running services, so treating it as
+# a blocking failure would make a second `devdock up` refuse. The authoritative
+# test is Compose's own bind, which reports UP_PORT_CONFLICT when it fails.
+PREFLIGHT_ADVISORY_CODES = frozenset({"PORT_UNAVAILABLE"})
+
+
 def _refusal(code: str, summary: str, lines: tuple[str, ...], remedy: str) -> LifecycleResult:
     return LifecycleResult(code, False, summary, lines, remedy)
 
@@ -59,7 +66,16 @@ def start_project(
     env = os.environ if environ is None else environ
 
     findings: list[Finding] = check_profile(profile, root, environ=env, adapter=runtime)
-    failures = tuple(item for item in findings if item.severity == "FAIL")
+    advisories = tuple(
+        f"[{item.severity}] {item.code}: {item.summary}"
+        for item in findings
+        if item.severity == "FAIL" and item.code in PREFLIGHT_ADVISORY_CODES
+    )
+    failures = tuple(
+        item
+        for item in findings
+        if item.severity == "FAIL" and item.code not in PREFLIGHT_ADVISORY_CODES
+    )
     if failures:
         return _refusal(
             "UP_PREFLIGHT_FAILED",
@@ -108,7 +124,7 @@ def start_project(
         )
 
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
-    preview = assessment.explain()
+    preview = assessment.explain() + advisories
     if not assessment.safe_to_act:
         return _refusal(
             "UP_OWNERSHIP_CONFLICT",

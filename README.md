@@ -155,6 +155,16 @@ The first implementation checks Python minimum versions and Docker Compose avail
 
 Set it in the shell before launching DevDock. The current CLI checks the inherited process environment and intentionally does not parse `.env` files.
 
+## Try it
+
+With Docker running, from the repository root:
+
+```bash
+python scripts/demo.py
+```
+
+This copies `examples/demo` to a temporary directory and walks through the whole lifecycle: discovery, checks, status before and after starting, an idempotent repeat of `up` and `down`, a dry-run preview, a refusal to touch a container DevDock did not create, and the volume that survives teardown. It removes everything it created. See [`examples/demo/README.md`](examples/demo/README.md) to run the steps by hand.
+
 ## Code of conduct
 
 Participation is covered by the [code of conduct](CODE_OF_CONDUCT.md).

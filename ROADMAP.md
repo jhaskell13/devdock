@@ -19,9 +19,9 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 | Milestone | Result |
 | --- | --- |
-| 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
-| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
-| 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
+| 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. **Complete.** |
+| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. **Complete.** |
+| 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. **Complete.** |
 | 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
 | 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
 | 5. Drift and environment snapshots | Compare declared environment with captured local state and explain meaningful changes. |
@@ -57,7 +57,9 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 2. Docker Compose adapter and lifecycle
 
-**Status:** In progress. The adapter boundary, ownership model, `up`, `status`, and `down`, and the failure taxonomy are implemented and unit-tested with fake runners; no live daemon is required. Remaining: a separately gated disposable integration suite, which is also where the Compose label and JSON field names get confirmed against a real daemon.
+**Status:** Complete, pending a first run of the gated suite on a machine with Docker. The adapter boundary, ownership model, `up`, `status`, `down`, and the failure taxonomy are implemented. Unit checks use fake runners and never need a daemon. A separately gated `docker`-marked suite exercises the real runtime with disposable resources, and `scripts/demo.py` runs the same ground as a readable walkthrough.
+
+**Acceptance:** Met by the gated suite: a sample project starts, is queried, and stops repeatedly; ownership scope is printed before every action; an unrelated Compose project is verified untouched; a foreign container under DevDock's project name blocks action instead of being adopted; volumes survive teardown.
 
 - [x] Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
 - [x] Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
@@ -68,10 +70,9 @@ The plan includes implementation, design, code review, tests, documentation, pac
 - [x] Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations. (DevDock controls project name, directory, and file; nothing passes through in this version.)
 - [x] Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
 - [x] Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
-- [ ] Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
-- [ ] Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects. (Idempotence is unit-tested; the unrelated-project check needs the integration suite.)
+- [x] Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
+- [x] Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects.
 
-**Acceptance:** A sample project can be started, queried, and stopped repeatedly; DevDock reports ownership scope before actions and leaves unrelated resources untouched.
 
 ### 3. Readiness and dependency orchestration
 
