@@ -423,6 +423,17 @@ def execute_stop(
             f"Nothing to stop for {scope.project_name}; volumes, if any, are untouched.",
         )
 
+    current = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
+    planned_ids = {item.id for item in plan.assessment.managed}
+    current_ids = {item.id for item in current.managed}
+    if not current.safe_to_act or current_ids != planned_ids:
+        return _refusal(
+            "DOWN_PLAN_STALE",
+            "Refusing to stop: the project's resources changed after the plan was shown.",
+            current.explain(),
+            "Run 'devdock down' again to see and confirm the current plan.",
+        )
+
     outcome = runtime.stop(
         project_name=scope.project_name,
         project_root=scope.root,
@@ -469,14 +480,18 @@ def execute_stop(
     if after.volumes:
         lines.append(f"Preserved {len(after.volumes)} volume(s): " + ", ".join(after.volumes))
     if after.errors:
-        lines.append("Post-stop inventory was incomplete: " + "; ".join(after.errors))
-    code = "DOWN_STOPPED" if not leftover and not after.networks else "DOWN_PARTIAL"
+        lines.append(
+            "Could not verify the result; the post-stop inventory was incomplete: "
+            + "; ".join(after.errors)
+        )
+    verified = not leftover and not after.networks and not after.errors
+    code = "DOWN_STOPPED" if verified else "DOWN_PARTIAL"
     return LifecycleResult(
         code,
-        code == "DOWN_STOPPED",
+        verified,
         f"Stopped {scope.project_name}."
-        if code == "DOWN_STOPPED"
-        else f"Stopped {scope.project_name} with resources remaining.",
+        if verified
+        else f"Stopped {scope.project_name} but could not confirm everything was removed.",
         tuple(lines),
-        None if code == "DOWN_STOPPED" else "Run 'devdock status' and retry 'devdock down'.",
+        None if verified else "Run 'devdock status' and retry 'devdock down'.",
     )

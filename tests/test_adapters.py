@@ -1,5 +1,6 @@
+import json
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -22,11 +23,18 @@ class RecordingRunner:
     def __init__(self, results: list[CommandResult | BaseException]) -> None:
         self._results = iter(results)
         self.calls: list[tuple[list[str], Path | None, float]] = []
+        self.environments: list[Mapping[str, str] | None] = []
 
     def __call__(
-        self, args: Sequence[str], *, cwd: Path | None = None, timeout: float
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        timeout: float,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         self.calls.append((list(args), cwd, timeout))
+        self.environments.append(env)
         result = next(self._results)
         if isinstance(result, BaseException):
             raise result
@@ -162,7 +170,7 @@ def test_default_runner_never_uses_a_shell(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def container_line(*fields: str) -> str:
-    return "\t".join(fields)
+    return "\t".join(json.dumps(field) for field in fields)
 
 
 def test_inventory_queries_use_label_and_anchored_name_filters() -> None:
@@ -181,7 +189,7 @@ def test_inventory_queries_use_label_and_anchored_name_filters() -> None:
     assert argv[3][:5] == ["docker", "volume", "ls", "--filter", label]
     for args in argv:
         fmt = args[args.index("--format") + 1]
-        assert "{{json" not in fmt and "inspect" not in args
+        assert "{{json .}}" not in fmt and "inspect" not in args  # never whole objects
         assert ".Env" not in fmt
 
 
@@ -211,8 +219,10 @@ def test_inventory_parses_container_fields_and_flags_malformed_lines() -> None:
         [
             CommandResult(0, f"{good}\n{bad}\n\n", ""),
             OK,
-            CommandResult(0, "n1\tdevdock-s-0123456789ab_default\nmalformed\n", ""),
-            CommandResult(0, "devdock-s-0123456789ab_data\n", ""),
+            CommandResult(
+                0, container_line("n1", "devdock-s-0123456789ab_default") + "\nmalformed\n", ""
+            ),
+            CommandResult(0, json.dumps("devdock-s-0123456789ab_data") + "\n", ""),
         ]
     )
     adapter = ComposeAdapter(runner, locate=lambda _: "docker")
@@ -222,7 +232,7 @@ def test_inventory_parses_container_fields_and_flags_malformed_lines() -> None:
     first, second = inventory.containers
     assert first.id == "id1" and first.service == "web" and first.parse_error is None
     assert first.config_files == "/proj/compose.yaml"
-    assert second.parse_error is not None and second.name == "broken"
+    assert second.parse_error is not None and second.name == ""
     assert inventory.networks == (NetworkRecord("n1", "devdock-s-0123456789ab_default"),)
     assert inventory.volumes == ("devdock-s-0123456789ab_data",)
 
@@ -283,6 +293,7 @@ def test_start_uses_devdock_controlled_options_only(tmp_path: Path) -> None:
         "devdock-s-0123456789ab",
         "up",
         "--detach",
+        "--remove-orphans=false",
     ]
     assert cwd == tmp_path and timeout == 30
 
@@ -523,6 +534,7 @@ def test_stop_runs_plain_compose_down_scoped_to_the_project(tmp_path: Path) -> N
         "--project-name",
         "devdock-s-0123456789ab",
         "down",
+        "--remove-orphans=false",
     ]
     assert cwd == tmp_path and timeout == 60
 
@@ -541,6 +553,7 @@ def test_stop_never_removes_volumes_images_or_orphans(tmp_path: Path) -> None:
     args = runner.calls[0][0]
     for forbidden in ("--volumes", "-v", "--rmi", "--remove-orphans"):
         assert forbidden not in args
+    assert "--remove-orphans=false" in args
 
 
 def test_stop_reports_failure_timeout_and_unavailability(tmp_path: Path) -> None:
@@ -573,3 +586,70 @@ def test_stop_rejects_an_unsafe_project_name(tmp_path: Path) -> None:
             timeout=5,
         )
     assert runner.calls == []
+
+
+# --- hardening ----------------------------------------------------------------
+
+
+def test_every_runtime_call_pins_compose_settings_the_project_env_could_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COMPOSE_REMOVE_ORPHANS", "true")  # a hostile shell/.env value
+    runner = RecordingRunner([OK] * 8)
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    adapter.detect_capabilities()
+    adapter.list_project_resources("devdock-s-0123456789ab")
+    adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=1,
+    )
+    adapter.stop(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=1,
+    )
+
+    assert runner.environments and all(env is not None for env in runner.environments)
+    for env in runner.environments:
+        assert env is not None
+        assert env["COMPOSE_REMOVE_ORPHANS"] == "false"
+        assert env["COMPOSE_ANSI"] == "never"
+    assert "PATH" in (runner.environments[0] or {})  # inherits the rest of the environment
+
+
+def test_tabs_and_newlines_inside_labels_cannot_forge_extra_records() -> None:
+    hostile_service = 'web\tFalse\n"forged"\t"x"\t"running"\t"p"\t"/p"\t"/p/c.yaml"\t"db"\t"False"'
+    line = container_line(
+        "id1", "p-web-1", "running", "p", "/p", "/p/compose.yaml", hostile_service, "False"
+    )
+    runner = RecordingRunner([CommandResult(0, line + "\n", ""), OK, OK, OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    inventory = adapter.list_project_resources("devdock-s-0123456789ab")
+
+    assert len(inventory.containers) == 1
+    assert inventory.containers[0].service == hostile_service
+    assert inventory.containers[0].parse_error is None
+
+
+def test_non_string_or_invalid_json_fields_become_parse_errors() -> None:
+    bad_type = "\t".join(["1", *[json.dumps("x")] * 7])
+    bad_json = "\t".join(["{oops", *[json.dumps("x")] * 7])
+    runner = RecordingRunner([CommandResult(0, f"{bad_type}\n{bad_json}\n", ""), OK, OK, OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    inventory = adapter.list_project_resources("devdock-s-0123456789ab")
+
+    assert all(item.parse_error for item in inventory.containers)
+
+
+def test_container_template_json_encodes_every_field() -> None:
+    from devdock.adapters.compose import _CONTAINER_FORMAT, _NETWORK_FORMAT, _VOLUME_FORMAT
+
+    for template in (_CONTAINER_FORMAT, _NETWORK_FORMAT, _VOLUME_FORMAT):
+        fields = template.split("\t")
+        assert all(field.startswith("{{json (") and field.endswith(")}}") for field in fields)

@@ -8,8 +8,8 @@ embedded in URLs are stripped.
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env`
 file, which DevDock deliberately never opens, so values that exist only there
-cannot be recognized here. That gap is why captured output stays hidden unless
-the user asks for it.
+cannot be recognized here. That gap is why only a short, redacted tail of
+output is shown by default and the full output requires an explicit flag.
 """
 
 from __future__ import annotations
@@ -20,6 +20,47 @@ from collections.abc import Mapping
 MIN_REDACTABLE_LENGTH = 4
 MAX_SUMMARY_LINES = 20
 PLACEHOLDER = "[redacted]"
+
+# Well-known variables whose values are not secrets and whose redaction would
+# only make output harder to read. Anything not listed here is redacted.
+NON_SECRET_NAMES = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "TERM",
+        "COLORTERM",
+        "LANG",
+        "LANGUAGE",
+        "SHELL",
+        "PWD",
+        "OLDPWD",
+        "SHLVL",
+        "DISPLAY",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "HOSTNAME",
+        "TZ",
+        "VIRTUAL_ENV",
+        "PYTHONPATH",
+        "COMSPEC",
+        "SYSTEMROOT",
+        "WINDIR",
+        "OS",
+        "NUMBER_OF_PROCESSORS",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMDATA",
+        "COMMONPROGRAMFILES",
+        "COMPOSE_ANSI",
+        "COMPOSE_PROGRESS",
+        "COMPOSE_REMOVE_ORPHANS",
+        "DOCKER_CLI_HINTS",
+    }
+)
+_NON_SECRET_PREFIXES = ("LC_", "XDG_")
 
 # C0/C1 control characters and DEL, except horizontal tab. These include the
 # ESC that starts ANSI sequences, so stripping them neutralizes terminal
@@ -42,19 +83,28 @@ def _redactable(environ: Mapping[str, str]) -> list[tuple[str, str]]:
         (value.strip(), name)
         for name, value in environ.items()
         if len(value.strip()) >= MIN_REDACTABLE_LENGTH
+        and name.upper() not in NON_SECRET_NAMES
+        and not name.upper().startswith(_NON_SECRET_PREFIXES)
     ]
     candidates.sort(key=lambda pair: len(pair[0]), reverse=True)
     return candidates
 
 
 def redact(text: str, environ: Mapping[str, str]) -> str:
-    """Replace known environment values and URL passwords in ``text``."""
+    """Replace known environment values and URL passwords in ``text``.
+
+    All values are matched in one pass with longest-first alternation, so a
+    short value can never rewrite the ``${NAME}`` placeholder a longer one
+    produced.
+    """
 
     if not text:
         return text
-    for value, name in _redactable(environ):
-        if value in text:
-            text = text.replace(value, "${" + name + "}")
+    candidates = _redactable(environ)
+    if candidates:
+        names_by_value = {value: name for value, name in candidates}
+        pattern = re.compile("|".join(re.escape(value) for value, _ in candidates))
+        text = pattern.sub(lambda match: "${" + names_by_value[match.group(0)] + "}", text)
     return _URL_CREDENTIALS.sub(lambda match: f"{match.group('prefix')}{PLACEHOLDER}@", text)
 
 

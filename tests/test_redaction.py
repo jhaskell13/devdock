@@ -66,3 +66,31 @@ def test_sanitize_strips_escapes_and_controls_but_keeps_tabs() -> None:
 
     assert sanitize("a\tb\x1b[31mred\x00\x7f\x9b") == "a\tb?[31mred???"
     assert sanitize("plain") == "plain"
+
+
+def test_short_values_cannot_mangle_placeholders_from_longer_ones() -> None:
+    environ = {"DB_PASSWORD": "hunter2-very-secret", "X": "PASS"}
+
+    text = redact("pw=hunter2-very-secret", environ)
+
+    assert text == "pw=${DB_PASSWORD}"
+
+
+def test_well_known_non_secret_variables_are_not_redacted() -> None:
+    environ = {
+        "PATH": "/usr/bin:/bin",
+        "TERM": "xterm-256color",
+        "LC_ALL": "en_US.UTF-8",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "API_KEY": "sk-live-123456",
+    }
+
+    text = redact("xterm-256color en_US.UTF-8 /usr/bin:/bin sk-live-123456", environ)
+
+    assert text == "xterm-256color en_US.UTF-8 /usr/bin:/bin ${API_KEY}"
+
+
+def test_home_and_user_are_still_redacted_as_private() -> None:
+    text = redact("/home/jane/project", {"HOME": "/home/jane", "USER": "jane"})
+
+    assert text == "${HOME}/project"

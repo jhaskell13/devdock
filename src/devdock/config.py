@@ -7,6 +7,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
+def _has_control_characters(text: str) -> bool:
+    """Control characters in a path would corrupt labels and line-oriented tool output."""
+
+    return any(ord(character) < 32 or ord(character) == 127 for character in text)
+
+
 class ProjectProfile(BaseModel):
     """The version 1 project configuration format."""
 
@@ -45,8 +51,8 @@ class ProjectProfile(BaseModel):
             return value
         raw_path = str(value)
         windows_path = PureWindowsPath(raw_path)
-        if "\0" in raw_path:
-            raise ValueError("compose_file must not contain a NUL character")
+        if _has_control_characters(raw_path):
+            raise ValueError("compose_file must not contain control characters")
         if value.is_absolute() or windows_path.is_absolute() or windows_path.drive:
             raise ValueError("compose_file must be a relative path inside the project root")
         if ".." in value.parts or ".." in windows_path.parts:
@@ -70,7 +76,7 @@ class ProjectProfile(BaseModel):
             raw_path = str(path)
             windows_path = PureWindowsPath(raw_path)
             if (
-                "\0" in raw_path
+                _has_control_characters(raw_path)
                 or path.is_absolute()
                 or windows_path.is_absolute()
                 or windows_path.drive

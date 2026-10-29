@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- Hardening from the Milestone 2 review: Compose runs with `COMPOSE_REMOVE_ORPHANS` pinned off so a project `.env` cannot widen `down`; `down` re-verifies the plan immediately before acting and reports `DOWN_PARTIAL` when it cannot confirm the result; inventory fields are JSON-encoded so labels cannot forge records; profile paths reject control characters; redaction skips well-known non-secret variables and cannot mangle its own placeholders.
 - `devdock --version`. Terminal output neutralizes control characters from container names and runtime data. The package ships a `py.typed` marker.
 - `devdock down` previews, confirms, then stops and removes a project's DevDock-managed containers and networks, re-checks what remains, and never removes volumes. Supports `--dry-run` and `--yes`.
 - `devdock status` reports each declared service's container, state, Compose health, readiness class, and published ports, lists resources DevDock does not own, and distinguishes running from ready.

@@ -488,11 +488,16 @@ class StopAdapter(StatusAdapter):
         self._stop_outcome = stop_outcome or OperationOutcome("succeeded", 0, "Removed", "")
         self._after = after
         self.stops: list[dict[str, object]] = []
+        self.stale: ResourceInventory | None = None
         self._inventory_calls = 0
 
     def list_project_resources(self, project_name: str) -> ResourceInventory:
+        # Call 1 builds the plan, call 2 re-verifies it before acting, call 3 is the
+        # post-stop check. ``stale`` replaces call 2 when set.
         self._inventory_calls += 1
-        if self._inventory_calls > 1 and self._after is not None:
+        if self._inventory_calls == 2 and self.stale is not None:
+            return self.stale
+        if self._inventory_calls > 2 and self._after is not None:
             return self._after
         return super().list_project_resources(project_name)
 
@@ -688,3 +693,50 @@ def test_execute_timeout_says_state_may_be_partial(tmp_path: Path) -> None:
 
     assert result.code == "DOWN_TIMED_OUT" and "7 seconds" in result.summary
     assert any("may already be stopped" in line for line in result.lines)
+
+
+def test_execute_refuses_when_resources_changed_after_the_plan(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+    newcomer = managed(scope, f"{scope.project_name}-cache-1", "cache", identifier="new")
+    adapter.stale = ResourceInventory(
+        scope.project_name, containers=inventory.containers + (newcomer,)
+    )
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+
+    assert not result.ok and result.code == "DOWN_PLAN_STALE"
+    assert adapter.stops == []
+
+
+def test_execute_refuses_when_a_conflict_appears_after_the_plan(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(inventory=inventory)
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+    squatter = ContainerRecord(id="sq", name=f"{scope.project_name}-x-1", state="running")
+    adapter.stale = ResourceInventory(
+        scope.project_name, containers=inventory.containers + (squatter,)
+    )
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+
+    assert result.code == "DOWN_PLAN_STALE" and adapter.stops == []
+
+
+def test_execute_does_not_claim_success_when_verification_fails(tmp_path: Path) -> None:
+    root, scope, inventory = running_project(tmp_path)
+    adapter = StopAdapter(
+        inventory=inventory,
+        after=ResourceInventory(scope.project_name, errors=("Container query failed.",)),
+    )
+    plan = plan_stop(profile(), root, adapter=adapter)
+    assert isinstance(plan, StopPlan)
+
+    result = execute_stop(plan, adapter=adapter, environ={})
+
+    assert not result.ok and result.code == "DOWN_PARTIAL"
+    assert "could not confirm" in result.summary
+    assert any("Could not verify" in line for line in result.lines)

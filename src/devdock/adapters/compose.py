@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from devdock.adapters.base import (
@@ -34,24 +35,47 @@ STOP_TIMEOUT = 120.0
 
 PROJECT_LABEL = "com.docker.compose.project"
 _FIELD_SEPARATOR = "\t"
-# One Go template field per ContainerRecord attribute, in order. ``.Label`` yields
-# an empty string for absent labels, so every line has the same field count.
+
+
+def _json_field(expression: str) -> str:
+    """Wrap a template expression so its value is JSON-encoded.
+
+    Label values are attacker-influenced and may contain tabs or newlines; JSON
+    encoding escapes them, so a line always has exactly one field per column and
+    a single container can never masquerade as two.
+    """
+
+    return "{{json (" + expression + ")}}"
+
+
+# One field per ContainerRecord attribute, in order. ``.Label`` yields an empty
+# string for absent labels, so every line has the same field count.
 _CONTAINER_FORMAT = _FIELD_SEPARATOR.join(
-    (
-        "{{.ID}}",
-        "{{.Names}}",
-        "{{.State}}",
-        f'{{{{.Label "{PROJECT_LABEL}"}}}}',
-        '{{.Label "com.docker.compose.project.working_dir"}}',
-        '{{.Label "com.docker.compose.project.config_files"}}',
-        '{{.Label "com.docker.compose.service"}}',
-        '{{.Label "com.docker.compose.oneoff"}}',
+    _json_field(expression)
+    for expression in (
+        ".ID",
+        ".Names",
+        ".State",
+        f'.Label "{PROJECT_LABEL}"',
+        '.Label "com.docker.compose.project.working_dir"',
+        '.Label "com.docker.compose.project.config_files"',
+        '.Label "com.docker.compose.service"',
+        '.Label "com.docker.compose.oneoff"',
     )
 )
 _CONTAINER_FIELD_COUNT = 8
-_NETWORK_FORMAT = _FIELD_SEPARATOR.join(("{{.ID}}", "{{.Name}}"))
-_VOLUME_FORMAT = "{{.Name}}"
+_NETWORK_FORMAT = _FIELD_SEPARATOR.join((_json_field(".ID"), _json_field(".Name")))
+_VOLUME_FORMAT = _json_field(".Name")
 _SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# Compose reads COMPOSE_* settings from the project's .env, which DevDock treats
+# as untrusted. Shell environment beats .env in Compose's precedence, so pinning
+# these here keeps the preview truthful regardless of what .env says.
+HARDENED_ENVIRONMENT: Mapping[str, str] = {
+    "COMPOSE_REMOVE_ORPHANS": "false",
+    "COMPOSE_ANSI": "never",
+    "COMPOSE_PROGRESS": "plain",
+}
 
 
 def run_command(
@@ -59,6 +83,7 @@ def run_command(
     *,
     cwd: Path | None = None,
     timeout: float,
+    env: Mapping[str, str] | None = None,
 ) -> CommandResult:
     """Default runner: no shell, captured text output, enforced timeout."""
 
@@ -69,6 +94,7 @@ def run_command(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=None if env is None else dict(env),
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -89,6 +115,9 @@ class ComposeAdapter:
         self._runner = runner
         self._locate = locate
 
+    def _environment(self) -> dict[str, str]:
+        return {**os.environ, **HARDENED_ENVIRONMENT}
+
     def detect_capabilities(self) -> ComposeCapabilities:
         """Check CLI presence, Compose plugin response, and daemon reachability.
 
@@ -101,7 +130,11 @@ class ComposeAdapter:
             return ComposeCapabilities(executable=None, compose_cli="missing")
 
         try:
-            version = self._runner([executable, "compose", "version"], timeout=VERSION_TIMEOUT)
+            version = self._runner(
+                [executable, "compose", "version"],
+                timeout=VERSION_TIMEOUT,
+                env=self._environment(),
+            )
         except (OSError, subprocess.TimeoutExpired):
             return ComposeCapabilities(executable=executable, compose_cli="unresponsive")
         if version.returncode:
@@ -116,6 +149,7 @@ class ComposeAdapter:
             daemon = self._runner(
                 [executable, "info", "--format", "{{.ServerVersion}}"],
                 timeout=DAEMON_TIMEOUT,
+                env=self._environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             daemon_state = "unavailable"
@@ -139,6 +173,7 @@ class ComposeAdapter:
                 [executable, "compose", "-f", str(config_path), "config", "--quiet"],
                 cwd=project_root,
                 timeout=CONFIG_TIMEOUT,
+                env=self._environment(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return ConfigValidation(config_path, "unavailable")
@@ -165,7 +200,9 @@ class ComposeAdapter:
 
         def query(description: str, args: list[str]) -> list[str]:
             try:
-                result = self._runner([executable, *args], timeout=LIST_TIMEOUT)
+                result = self._runner(
+                    [executable, *args], timeout=LIST_TIMEOUT, env=self._environment()
+                )
             except (OSError, subprocess.TimeoutExpired):
                 errors.append(f"{description} did not complete.")
                 return []
@@ -212,7 +249,7 @@ class ComposeAdapter:
             )
         )
         volumes = tuple(
-            line.strip()
+            _parse_volume(line)
             for line in query(
                 "Volume query",
                 ["volume", "ls", "--filter", label_filter, "--format", _VOLUME_FORMAT],
@@ -223,7 +260,7 @@ class ComposeAdapter:
             containers=containers,
             name_collisions=collisions,
             networks=tuple(item for item in networks if item is not None),
-            volumes=volumes,
+            volumes=tuple(item for item in volumes if item is not None),
             errors=tuple(errors),
         )
 
@@ -249,7 +286,7 @@ class ComposeAdapter:
         if executable is None:
             return OperationOutcome("unavailable")
         args = self._project_args(executable, project_name, project_root, compose_file)
-        args += ["up", "--detach"]
+        args += ["up", "--detach", "--remove-orphans=false"]
         return self._run_operation(args, project_root, timeout)
 
     def _project_args(
@@ -290,14 +327,14 @@ class ComposeAdapter:
         if executable is None:
             return OperationOutcome("unavailable")
         args = self._project_args(executable, project_name, project_root, compose_file)
-        args += ["down"]
+        args += ["down", "--remove-orphans=false"]
         return self._run_operation(args, project_root, timeout)
 
     def _run_operation(
         self, args: list[str], project_root: Path, timeout: float
     ) -> OperationOutcome:
         try:
-            result = self._runner(args, cwd=project_root, timeout=timeout)
+            result = self._runner(args, cwd=project_root, timeout=timeout, env=self._environment())
         except subprocess.TimeoutExpired as expired:
             return OperationOutcome(
                 "timed_out",
@@ -330,7 +367,9 @@ class ComposeAdapter:
             "--services",
         ]
         try:
-            result = self._runner(args, cwd=project_root, timeout=CONFIG_TIMEOUT)
+            result = self._runner(
+                args, cwd=project_root, timeout=CONFIG_TIMEOUT, env=self._environment()
+            )
         except (OSError, subprocess.TimeoutExpired):
             return DeclaredServices(error="Compose service listing did not complete.")
         if result.returncode:
@@ -355,7 +394,9 @@ class ComposeAdapter:
         args = self._project_args(executable, project_name, project_root, compose_file)
         args += ["ps", "--all", "--no-trunc", "--format", "json"]
         try:
-            result = self._runner(args, cwd=project_root, timeout=LIST_TIMEOUT)
+            result = self._runner(
+                args, cwd=project_root, timeout=LIST_TIMEOUT, env=self._environment()
+            )
         except (OSError, subprocess.TimeoutExpired):
             return ServiceObservations(error="Service status query did not complete.")
         if result.returncode:
@@ -440,16 +481,29 @@ def _parse_publisher(raw: object) -> PublishedPort | None:
     )
 
 
-def _parse_container(line: str) -> ContainerRecord:
+def _decode_fields(line: str, expected: int) -> list[str] | str:
+    """Split a template line and JSON-decode each field; return an error string on failure."""
+
     fields = line.split(_FIELD_SEPARATOR)
-    if len(fields) != _CONTAINER_FIELD_COUNT:
-        return ContainerRecord(
-            id="",
-            name=fields[1] if len(fields) > 1 else "",
-            state="",
-            parse_error=f"Expected {_CONTAINER_FIELD_COUNT} fields, got {len(fields)}.",
-        )
-    identifier, name, state, project, working_dir, config_files, service, oneoff = fields
+    if len(fields) != expected:
+        return f"Expected {expected} fields, got {len(fields)}."
+    decoded: list[str] = []
+    for field in fields:
+        try:
+            value = json.loads(field)
+        except json.JSONDecodeError:
+            return "A field was not valid JSON."
+        if not isinstance(value, str):
+            return "A field was not a JSON string."
+        decoded.append(value)
+    return decoded
+
+
+def _parse_container(line: str) -> ContainerRecord:
+    decoded = _decode_fields(line, _CONTAINER_FIELD_COUNT)
+    if isinstance(decoded, str):
+        return ContainerRecord(id="", name="", state="", parse_error=decoded)
+    identifier, name, state, project, working_dir, config_files, service, oneoff = decoded
     return ContainerRecord(
         id=identifier,
         name=name,
@@ -463,10 +517,15 @@ def _parse_container(line: str) -> ContainerRecord:
 
 
 def _parse_network(line: str) -> NetworkRecord | None:
-    fields = line.split(_FIELD_SEPARATOR)
-    if len(fields) != 2:
+    decoded = _decode_fields(line, 2)
+    if isinstance(decoded, str):
         return None
-    return NetworkRecord(id=fields[0], name=fields[1])
+    return NetworkRecord(id=decoded[0], name=decoded[1])
+
+
+def _parse_volume(line: str) -> str | None:
+    decoded = _decode_fields(line, 1)
+    return None if isinstance(decoded, str) else decoded[0]
 
 
 def _captured(stream: str | bytes | None) -> str:

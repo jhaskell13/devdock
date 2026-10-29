@@ -9,7 +9,7 @@ that implement them so the protocol never advertises unimplemented behavior.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -43,6 +43,7 @@ class CommandRunner(Protocol):
         *,
         cwd: Path | None = None,
         timeout: float,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult: ...
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from devdock.config import ProfileError, ProjectProfile, load_profile
@@ -80,3 +81,19 @@ def test_rejects_duplicate_ports() -> None:
         ProjectProfile.model_validate(
             {"schema_version": 1, "project": "sample", "ports": [8080, 8080]}
         )
+
+
+@pytest.mark.parametrize("field", ["compose_file", "required_files", "required_dirs"])
+@pytest.mark.parametrize("hostile", ["a\tb.yaml", "a\nb.yaml", "a\x1b[2Jb.yaml", "a\x7fb"])
+def test_paths_with_control_characters_are_rejected(
+    tmp_path: Path, field: str, hostile: str
+) -> None:
+    value = hostile if field == "compose_file" else [hostile]
+    profile_path = tmp_path / "devdock.yaml"
+    profile_path.write_text(
+        yaml.safe_dump({"schema_version": 1, "project": "sample", field: value}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProfileError, match="control characters|project-contained"):
+        load_profile(profile_path)

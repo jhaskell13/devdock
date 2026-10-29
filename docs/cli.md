@@ -29,9 +29,9 @@ The profile is UTF-8 YAML loaded with safe parsing. The root must be an object w
 | `schema_version` | Required integer `1`; any other version is rejected. |
 | `project` | Required, non-empty string; whitespace-only values are rejected. |
 | `runtimes` | Optional mapping of lowercase runtime names to non-empty requirement strings. Python checks use the interpreter running DevDock and print its executable and version. If that executable resolves to this project’s `.venv`, `venv`, or `env`, DevDock identifies it as the target interpreter too; DevDock never launches a project-controlled interpreter to probe its version. |
-| `compose_file` | Optional forward-slash, project-relative path. Absolute/drive-qualified paths, backslashes, and lexical `..` traversal are rejected. `check` verifies it exists and that resolved symlinks remain inside the project. |
+| `compose_file` | Optional forward-slash, project-relative path. Absolute/drive-qualified paths, backslashes, control characters, and lexical `..` traversal are rejected. `check` verifies it exists and that resolved symlinks remain inside the project. |
 | `required_env` | Optional list of names accepted as Python identifiers. Each name must be set to a non-empty value in DevDock's inherited process environment. Unset and empty values get distinct findings, and values are never printed. |
-| `required_files` | Optional list of project-relative file paths. Absolute paths, drive prefixes, backslashes, NUL, and lexical `..` traversal are rejected. Resolved symlinks must remain inside the project. |
+| `required_files` | Optional list of project-relative file paths. Absolute paths, drive prefixes, backslashes, control characters, and lexical `..` traversal are rejected. Resolved symlinks must remain inside the project. |
 | `required_dirs` | Optional list of project-relative directory paths with the same containment rules as `required_files`. |
 | `ports` | Optional distinct integer TCP ports from `1` through `65535`. Each is probed by binding `127.0.0.1`; this is a momentary check, not a reservation. |
 
@@ -72,9 +72,9 @@ Repeating `up` with resources already running is safe; Compose reconciles to the
 
 ### Runtime output and redaction
 
-Captured Docker output is hidden by default. On failure DevDock prints the last 20 meaningful lines of it; `--show-output` prints all of both streams.
+On success, captured Docker output is not shown. On failure DevDock prints the last 20 meaningful lines of it after redaction; `--show-output` prints all of both streams, also redacted. `--show-output` controls volume, never redaction.
 
-Both paths are redacted and `--show-output` does not disable redaction. Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, and passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`.
+Any value from DevDock's own environment that is at least four characters long is replaced by `${NAME}`, except a short list of well-known non-secret variables such as `PATH`, `TERM`, `LANG`, and `LC_*`; `HOME` and `USER` are treated as private and redacted. Passwords inside `scheme://user:password@host` URLs are replaced with `[redacted]`. Values are matched in one pass, longest first, so a short value cannot rewrite another value's placeholder.
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env` file, which DevDock never opens, so a value that exists only there cannot be recognized and could appear in output. Treat `--show-output` as a deliberate disclosure and review what you paste elsewhere.
 
@@ -91,7 +91,9 @@ The plan is built from the same gates as `up` except the profile's diagnostics, 
 
 Then one of three things happens. `--dry-run` prints `DOWN_DRY_RUN` and exits `0` without changing anything. Otherwise, if there is nothing to stop, DevDock reports `DOWN_NOTHING_TO_STOP` and runs no command; repeating `down` is safe. If there is work to do, DevDock asks for confirmation on an interactive terminal, or requires `--yes` when standard input is not a terminal, and refuses with `DOWN_CONFIRMATION_REQUIRED` otherwise. Declining prints `DOWN_CANCELLED` and exits `1` with nothing changed.
 
-The command run is `docker compose --project-directory <root> --file <compose file> --project-name <derived name> down`, with no `--volumes`, `--rmi`, or `--remove-orphans`. After it returns DevDock re-inventories the project: `DOWN_STOPPED` means no planned container or network survived; `DOWN_PARTIAL` lists what remains and exits `1`. A timeout reports that some resources may already be gone and points at `devdock status`. Runtime output is handled exactly as for `up`.
+Immediately before acting, DevDock re-reads the inventory. If the set of managed containers changed while the prompt was open, or a conflict appeared, it refuses with `DOWN_PLAN_STALE` and nothing is run; rerun `down` to see the current plan.
+
+The command run is `docker compose --project-directory <root> --file <compose file> --project-name <derived name> down --remove-orphans=false`, with no `--volumes` or `--rmi`. After it returns DevDock re-inventories the project: `DOWN_STOPPED` means the re-inventory succeeded and no planned container or network survived; `DOWN_PARTIAL` is returned, with exit `1`, when something remains or when the re-inventory itself failed, so DevDock never claims success it could not verify. A timeout reports that some resources may already be gone and points at `devdock status`. Runtime output is handled exactly as for `up`.
 
 ## Reporting status
 
@@ -115,6 +117,10 @@ Services are listed in declared order, one row per container when a service has 
 
 Exit code is `0` when the report is complete and `1` when a required input is missing or any runtime query failed; a partial table is still printed in that case. Readiness does not affect the exit code yet; scripts should wait for the planned machine-readable output rather than parse this table.
 
+### Environment handed to Compose
+
+DevDock runs Compose with its own environment plus three pinned settings: `COMPOSE_REMOVE_ORPHANS=false`, `COMPOSE_ANSI=never`, and `COMPOSE_PROGRESS=plain`. Compose reads `COMPOSE_*` settings from the project's `.env`, which DevDock treats as untrusted; shell values take precedence over `.env` in Compose, so these pins keep the `down` preview truthful and the captured output free of colour codes whatever `.env` says. Other `.env` content, including `DOCKER_HOST` or `DOCKER_CONTEXT`, is honoured by Compose exactly as it would be if you ran `docker compose` in that directory yourself; DevDock does not read the file to check.
+
 ## Ownership scope
 
 Lifecycle commands (planned) act only on Compose resources DevDock can prove it created. `inspect` already prints the Compose project name DevDock derives for a profile so the resources are recognizable in `docker ps`.
@@ -125,7 +131,11 @@ Lifecycle commands (planned) act only on Compose resources DevDock can prove it 
 - Changing `compose_file` or moving the project while resources exist is reported as a mismatch rather than silently creating a parallel project; stop the old resources with the configuration that created them first.
 - Volumes under the name are listed as preserved. No DevDock command removes volumes in this version.
 
-Only identity fields and the ownership labels above are requested from Docker; container environments, images, and full label sets are never read for this purpose.
+Only identity fields and the ownership labels above are requested from Docker, each JSON-encoded by the template so a tab or newline inside a label cannot forge an extra record; container environments, images, and full label sets are never read for this purpose.
+
+### Limits of label-based ownership
+
+This model protects against accidental overlap: another project, a renamed directory, a stale configuration, or a one-off container. It is not a defence against a hostile local process with access to the Docker socket. Such a process can set exactly the labels DevDock looks for and make its container count as managed, and it can already control everything Docker manages. Networks and volumes are matched by the project label alone because Compose records no working-directory or file labels on them. Durable records of what DevDock itself created are later roadmap work and will tighten these rules.
 
 ## Diagnostic codes
 
@@ -138,7 +148,7 @@ Each `check` result includes a stable code, severity, summary, optional evidence
 | Paths | `REQUIRED_FILE_FOUND`, `REQUIRED_FILE_MISSING`, `REQUIRED_DIRECTORY_OUTSIDE_PROJECT` | Required filesystem entries and resolved project containment. |
 | Environment | `ENVIRONMENT_VARIABLE_UNSET`, `ENVIRONMENT_VARIABLE_EMPTY`, `ENVIRONMENT_VARIABLE_SET` | Presence state only; values are not included in findings. |
 | Ports | `PORT_AVAILABLE`, `PORT_UNAVAILABLE` | A momentary TCP bind probe on loopback. |
-| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `DOWN_STOPPED`, `DOWN_PARTIAL`, `DOWN_CONFIRMATION_REQUIRED`, `DOWN_OWNERSHIP_CONFLICT` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
+| Lifecycle | `UP_STARTED`, `UP_PREFLIGHT_FAILED`, `UP_OWNERSHIP_CONFLICT`, `UP_TIMED_OUT`, `UP_FAILED`, `STATUS_REPORTED`, `STATUS_INCOMPLETE`, `DOWN_STOPPED`, `DOWN_PARTIAL`, `DOWN_PLAN_STALE`, `DOWN_CONFIRMATION_REQUIRED`, `DOWN_OWNERSHIP_CONFLICT` | Outcome of a lifecycle command; refusals name the gate that stopped it. |
 | Partial checks | `DOCKER_DAEMON_SKIPPED`, `COMPOSE_CONFIG_SKIPPED` | A prerequisite prevented a dependent check from running; evidence states why it was skipped. |
 
 Codes are illustrative and not exhaustive; the `code` field in source is authoritative. Existing codes should not be repurposed for different failure meanings.
