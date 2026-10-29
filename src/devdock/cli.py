@@ -5,9 +5,11 @@ from typing import Annotated
 
 import typer
 
-from devdock.config import ProfileError, load_profile
+from devdock.adapters.compose import START_TIMEOUT
+from devdock.config import ProfileError, ProjectProfile, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
+from devdock.lifecycle import LifecycleResult, start_project
 from devdock.metadata import read_python_metadata
 from devdock.ownership import ownership_scope
 
@@ -95,24 +97,65 @@ def inspect(
         typer.echo(f"Compose project name: {ownership_scope(loaded, root).project_name}")
 
 
-@app.command()
-def check(
-    directory: Annotated[Path, typer.Argument(help="Project directory to check.")] = Path("."),
-) -> None:
-    """Validate the project profile and check its declared prerequisites."""
+def _load_project(directory: Path) -> tuple[Path, ProjectProfile]:
+    """Resolve the project root and its valid profile, or exit with an error."""
 
-    discovery = discover_project_result(directory)
-    root = discovery.root
+    root = discover_project_result(directory).root
     profile_path = root / CONFIG_NAME
     if not profile_path.is_file():
         typer.echo(f"FAIL: {CONFIG_NAME} was not found in {root}", err=True)
         typer.echo("Run 'devdock init' to create a starter profile.", err=True)
         raise typer.Exit(code=1)
     try:
-        profile = load_profile(profile_path)
+        return root, load_profile(profile_path)
     except ProfileError as exc:
         typer.echo(f"FAIL: Invalid {CONFIG_NAME}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _render(result: LifecycleResult) -> None:
+    """Print a lifecycle result and exit non-zero when it did not succeed."""
+
+    stream_err = not result.ok
+    typer.echo(f"[{'OK' if result.ok else 'REFUSED'}] {result.code}: {result.summary}",
+               err=stream_err)
+    for line in result.lines:
+        typer.echo(line, err=stream_err)
+    if result.remedy:
+        typer.echo(f"Suggested action: {result.remedy}", err=stream_err)
+    if not result.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def up(
+    directory: Annotated[Path, typer.Argument(help="Project directory to start.")] = Path("."),
+    show_output: Annotated[
+        bool,
+        typer.Option("--show-output", help="Show the runtime's full output, still redacted."),
+    ] = False,
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", min=1.0, help="Seconds to allow the start to run."),
+    ] = START_TIMEOUT,
+) -> None:
+    """Start the project's Compose services detached, without waiting for readiness."""
+
+    root, profile = _load_project(directory)
+    _render(
+        start_project(
+            profile, root, timeout=timeout, show_output=show_output
+        )
+    )
+
+
+@app.command()
+def check(
+    directory: Annotated[Path, typer.Argument(help="Project directory to check.")] = Path("."),
+) -> None:
+    """Validate the project profile and check its declared prerequisites."""
+
+    root, profile = _load_project(directory)
 
     findings = check_profile(profile, root)
     failures = 0

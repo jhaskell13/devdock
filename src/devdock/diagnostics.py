@@ -14,7 +14,7 @@ from typing import Literal
 from devdock.adapters import ComposeAdapter, RuntimeAdapter
 from devdock.config import ProjectProfile
 from devdock.metadata import read_python_metadata
-from devdock.ownership import compose_path_for
+from devdock.ownership import compose_path_for, resolves_inside
 
 PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.(\d+))?$")
 Severity = Literal["PASS", "WARN", "FAIL", "SKIP"]
@@ -62,13 +62,6 @@ def _compose_skipped(code: str, check_name: str, reason: str) -> Finding:
         f"{check_name} was not run.",
         evidence=(reason,),
     )
-
-
-def _inside_project(path: Path, root: Path) -> bool:
-    try:
-        return path.resolve().is_relative_to(root.resolve())
-    except (OSError, RuntimeError):
-        return False
 
 
 def _resolved_path(path: Path) -> Path | None:
@@ -128,7 +121,7 @@ def _check_compose(
                 remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
             )
         )
-    elif not _inside_project(compose_path, root):
+    elif not resolves_inside(compose_path, root):
         findings.append(
             _finding(
                 "COMPOSE_FILE_OUTSIDE_PROJECT",
@@ -412,7 +405,7 @@ def check_profile(
 
     if profile.compose_file is not None and "docker" not in profile.runtimes:
         compose_path = root / profile.compose_file
-        if not _inside_project(compose_path, root):
+        if not resolves_inside(compose_path, root):
             findings.append(
                 _finding(
                     "COMPOSE_FILE_OUTSIDE_PROJECT",

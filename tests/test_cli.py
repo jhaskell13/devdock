@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import devdock.adapters.compose as compose
+import devdock.cli as cli
 from devdock.cli import app
+from devdock.lifecycle import LifecycleResult
 
 runner = CliRunner()
 
@@ -126,3 +129,50 @@ def test_inspect_reports_the_compose_project_name_devdock_will_manage(tmp_path: 
 
     assert result.exit_code == 0
     assert "Compose project name: devdock-sample-app-" in result.stdout
+
+
+def test_up_refuses_without_a_compose_file_and_exits_non_zero(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "[REFUSED] UP_COMPOSE_FILE_MISSING" in result.stderr
+    assert "Suggested action:" in result.stderr
+
+
+def test_up_requires_a_profile(tmp_path: Path) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "devdock.yaml was not found" in result.stderr
+
+
+def test_up_reports_a_successful_start_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: sample\n", encoding="utf-8"
+    )
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_start(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("UP_STARTED", True, "Started devdock-sample-x.", ("detail",))
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[OK] UP_STARTED: Started devdock-sample-x." in result.stdout
+    assert "detail" in result.stdout
+
+
+def test_up_rejects_a_non_positive_timeout(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["up", str(tmp_path), "--timeout", "0"])
+
+    assert result.exit_code != 0

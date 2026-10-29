@@ -9,6 +9,7 @@ from devdock.adapters.base import (
     NetworkRecord,
     ResourceInventory,
     RuntimeAdapter,
+    StartOutcome,
 )
 from devdock.adapters.compose import ComposeAdapter, run_command
 
@@ -22,5 +23,6 @@ __all__ = [
     "NetworkRecord",
     "ResourceInventory",
     "RuntimeAdapter",
+    "StartOutcome",
     "run_command",
 ]

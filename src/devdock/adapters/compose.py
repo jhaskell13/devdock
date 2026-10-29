@@ -17,12 +17,14 @@ from devdock.adapters.base import (
     DaemonState,
     NetworkRecord,
     ResourceInventory,
+    StartOutcome,
 )
 
 VERSION_TIMEOUT = 5.0
 DAEMON_TIMEOUT = 5.0
 CONFIG_TIMEOUT = 10.0
 LIST_TIMEOUT = 10.0
+START_TIMEOUT = 300.0
 
 PROJECT_LABEL = "com.docker.compose.project"
 _FIELD_SEPARATOR = "\t"
@@ -207,6 +209,56 @@ class ComposeAdapter:
             errors=tuple(errors),
         )
 
+    def start(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float = START_TIMEOUT,
+    ) -> StartOutcome:
+        """Run ``docker compose up --detach`` for exactly this project.
+
+        DevDock supplies the project name, project directory, and Compose file
+        itself; no user-provided Compose options are forwarded. The command
+        returns once containers are created and started, which is not the same
+        as being ready. Readiness waiting is deliberately absent here.
+        """
+
+        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
+            raise ValueError(f"project name is not filter-safe: {project_name!r}")
+        executable = self._locate("docker")
+        if executable is None:
+            return StartOutcome("unavailable")
+        args = [
+            executable,
+            "compose",
+            "--project-directory",
+            str(project_root),
+            "--file",
+            str(compose_file),
+            "--project-name",
+            project_name,
+            "up",
+            "--detach",
+        ]
+        try:
+            result = self._runner(args, cwd=project_root, timeout=timeout)
+        except subprocess.TimeoutExpired as expired:
+            return StartOutcome(
+                "timed_out",
+                raw_stdout=_captured(expired.stdout),
+                raw_stderr=_captured(expired.stderr),
+            )
+        except OSError:
+            return StartOutcome("unavailable")
+        return StartOutcome(
+            "started" if result.returncode == 0 else "failed",
+            returncode=result.returncode,
+            raw_stdout=result.stdout,
+            raw_stderr=result.stderr,
+        )
+
 
 def _parse_container(line: str) -> ContainerRecord:
     fields = line.split(_FIELD_SEPARATOR)
@@ -235,3 +287,13 @@ def _parse_network(line: str) -> NetworkRecord | None:
     if len(fields) != 2:
         return None
     return NetworkRecord(id=fields[0], name=fields[1])
+
+
+def _captured(stream: str | bytes | None) -> str:
+    """Decode partial output attached to a TimeoutExpired, which may be bytes."""
+
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream

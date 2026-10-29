@@ -240,3 +240,106 @@ def test_inventory_without_docker_cli_reports_an_error() -> None:
 
     assert inventory.errors == ("Docker CLI is not available.",)
     assert inventory.containers == ()
+
+
+# --- start ----------------------------------------------------------------
+
+
+def test_start_uses_devdock_controlled_options_only(tmp_path: Path) -> None:
+    runner = RecordingRunner([CommandResult(0, "Container web started", "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+    compose_file = tmp_path / "compose.yaml"
+
+    outcome = adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=compose_file,
+        timeout=30,
+    )
+
+    assert outcome.started and outcome.returncode == 0
+    args, cwd, timeout = runner.calls[0]
+    assert args == [
+        "docker", "compose",
+        "--project-directory", str(tmp_path),
+        "--file", str(compose_file),
+        "--project-name", "devdock-s-0123456789ab",
+        "up", "--detach",
+    ]
+    assert cwd == tmp_path and timeout == 30
+
+
+def test_start_never_waits_for_readiness_or_removes_orphans(tmp_path: Path) -> None:
+    runner = RecordingRunner([OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=30,
+    )
+
+    args = runner.calls[0][0]
+    assert "--wait" not in args
+    assert "--remove-orphans" not in args
+    assert "--force-recreate" not in args
+
+
+def test_start_reports_failure_with_output_for_the_caller_to_redact(tmp_path: Path) -> None:
+    runner = RecordingRunner([CommandResult(1, "", "port is already allocated")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    outcome = adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=30,
+    )
+
+    assert outcome.status == "failed" and outcome.returncode == 1
+    assert outcome.raw_stderr == "port is already allocated"
+
+
+def test_start_timeout_keeps_partial_output_including_bytes(tmp_path: Path) -> None:
+    expired = subprocess.TimeoutExpired(["docker"], 5, output=b"pulling image\n", stderr=None)
+    adapter = ComposeAdapter(RecordingRunner([expired]), locate=lambda _: "docker")
+
+    outcome = adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=5,
+    )
+
+    assert outcome.status == "timed_out"
+    assert outcome.raw_stdout == "pulling image\n"
+    assert outcome.raw_stderr == ""
+
+
+def test_start_without_docker_is_unavailable_and_runs_nothing(tmp_path: Path) -> None:
+    runner = RecordingRunner([])
+    adapter = ComposeAdapter(runner, locate=lambda _: None)
+
+    outcome = adapter.start(
+        project_name="devdock-s-0123456789ab",
+        project_root=tmp_path,
+        compose_file=tmp_path / "compose.yaml",
+        timeout=5,
+    )
+
+    assert outcome.status == "unavailable" and runner.calls == []
+
+
+def test_start_rejects_an_unsafe_project_name_before_running_anything(tmp_path: Path) -> None:
+    runner = RecordingRunner([])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    with pytest.raises(ValueError):
+        adapter.start(
+            project_name="evil name; rm -rf /",
+            project_root=tmp_path,
+            compose_file=tmp_path / "compose.yaml",
+            timeout=5,
+        )
+    assert runner.calls == []

@@ -128,6 +128,30 @@ class ResourceInventory:
     errors: tuple[str, ...] = ()
 
 
+StartStatus = Literal["started", "failed", "timed_out", "unavailable"]
+
+
+@dataclass(frozen=True)
+class StartOutcome:
+    """Result of a start attempt, including raw captured output.
+
+    Unlike the inspect-side result types, this one deliberately carries the
+    runtime's raw stdout and stderr, because a failed start is not actionable
+    without them. The fields are named ``raw_`` as a warning: they may contain
+    interpolated configuration values and must pass through
+    ``devdock.redaction`` before being displayed.
+    """
+
+    status: StartStatus
+    returncode: int | None = None
+    raw_stdout: str = ""
+    raw_stderr: str = ""
+
+    @property
+    def started(self) -> bool:
+        return self.status == "started"
+
+
 class RuntimeAdapter(Protocol):
     """Inspect-side operations every runtime adapter provides."""
 
@@ -141,4 +165,15 @@ class RuntimeAdapter(Protocol):
 
     def list_project_resources(self, project_name: str) -> ResourceInventory:
         """List containers, networks, and volumes under ``project_name`` without mutation."""
+        ...
+
+    def start(
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float,
+    ) -> StartOutcome:
+        """Start the project's services detached, without waiting for readiness."""
         ...

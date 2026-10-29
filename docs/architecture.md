@@ -8,7 +8,8 @@ DevDock starts as a Python CLI for inspecting and checking one local project. Th
 Typer commands
   ├─ init      writes a starter profile
   ├─ inspect   discovers the project root and reports known files
-  └─ check     loads the profile, validates it, and runs diagnostics
+  ├─ check     loads the profile, validates it, and runs diagnostics
+  └─ up        gates on checks and ownership, then starts services detached
 
 Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
@@ -17,6 +18,13 @@ Runtime adapter (adapters/)
   ├─ RuntimeAdapter protocol: capability detection, config validation, resource inventory
   ├─ ComposeAdapter: argument arrays, bounded timeouts, injectable CommandRunner
   └─ results carry status only; captured output is never copied into findings
+
+Lifecycle (lifecycle.py)
+  ├─ policy only: every gate runs before the adapter is asked to mutate
+  └─ returns redacted display lines and a stable code
+
+Redaction (redaction.py)
+  └─ replaces known environment values and URL passwords in captured output
 
 Ownership (ownership.py)
   ├─ deterministic Compose project name: devdock-<slug>-<root digest>

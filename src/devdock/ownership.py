@@ -47,6 +47,15 @@ def compose_path_for(profile: ProjectProfile, root: Path) -> Path | None:
     return next((root / name for name in COMPOSE_NAMES if (root / name).is_file()), None)
 
 
+def resolves_inside(path: Path, root: Path) -> bool:
+    """Whether ``path`` stays within ``root`` after symlinks are resolved."""
+
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
 def _slug(project: str) -> str:
     slug = _SLUG_SEPARATORS.sub("-", project.lower()).strip("-")
     slug = slug[:SLUG_MAX_LENGTH].strip("-")
