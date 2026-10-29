@@ -9,6 +9,7 @@ from devdock.config import ProfileError, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
 from devdock.metadata import read_python_metadata
+from devdock.ownership import ownership_scope
 
 app = typer.Typer(
     name="devdock",
@@ -91,6 +92,7 @@ def inspect(
             raise typer.Exit(code=1) from exc
         typer.echo(f"Configured project: {loaded.project}")
         typer.echo(f"Declared runtimes: {', '.join(loaded.runtimes) or 'none'}")
+        typer.echo(f"Compose project name: {ownership_scope(loaded, root).project_name}")
 
 
 @app.command()

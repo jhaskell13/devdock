@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -12,12 +13,37 @@ from devdock.adapters.base import (
     CommandRunner,
     ComposeCapabilities,
     ConfigValidation,
+    ContainerRecord,
     DaemonState,
+    NetworkRecord,
+    ResourceInventory,
 )
 
 VERSION_TIMEOUT = 5.0
 DAEMON_TIMEOUT = 5.0
 CONFIG_TIMEOUT = 10.0
+LIST_TIMEOUT = 10.0
+
+PROJECT_LABEL = "com.docker.compose.project"
+_FIELD_SEPARATOR = "\t"
+# One Go template field per ContainerRecord attribute, in order. ``.Label`` yields
+# an empty string for absent labels, so every line has the same field count.
+_CONTAINER_FORMAT = _FIELD_SEPARATOR.join(
+    (
+        "{{.ID}}",
+        "{{.Names}}",
+        "{{.State}}",
+        f'{{{{.Label "{PROJECT_LABEL}"}}}}',
+        '{{.Label "com.docker.compose.project.working_dir"}}',
+        '{{.Label "com.docker.compose.project.config_files"}}',
+        '{{.Label "com.docker.compose.service"}}',
+        '{{.Label "com.docker.compose.oneoff"}}',
+    )
+)
+_CONTAINER_FIELD_COUNT = 8
+_NETWORK_FORMAT = _FIELD_SEPARATOR.join(("{{.ID}}", "{{.Name}}"))
+_VOLUME_FORMAT = "{{.Name}}"
+_SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 def run_command(
@@ -113,3 +139,99 @@ class ComposeAdapter:
         if parsed.returncode:
             return ConfigValidation(config_path, "invalid", parsed.returncode)
         return ConfigValidation(config_path, "valid", 0)
+
+    def list_project_resources(self, project_name: str) -> ResourceInventory:
+        """Query containers (by label and by name prefix), networks, and volumes.
+
+        Only identity fields and Compose ownership labels are requested from the
+        runtime; container environment and full label sets are never read.
+        ``project_name`` must already be Compose-safe so it is inert inside
+        filter expressions.
+        """
+
+        if not _SAFE_PROJECT_NAME.fullmatch(project_name):
+            raise ValueError(f"project name is not filter-safe: {project_name!r}")
+        executable = self._locate("docker")
+        if executable is None:
+            return ResourceInventory(project_name, errors=("Docker CLI is not available.",))
+        label_filter = f"label={PROJECT_LABEL}={project_name}"
+        errors: list[str] = []
+
+        def query(description: str, args: list[str]) -> list[str]:
+            try:
+                result = self._runner([executable, *args], timeout=LIST_TIMEOUT)
+            except (OSError, subprocess.TimeoutExpired):
+                errors.append(f"{description} did not complete.")
+                return []
+            if result.returncode:
+                errors.append(f"{description} failed with exit code {result.returncode}.")
+                return []
+            return [line for line in result.stdout.splitlines() if line.strip()]
+
+        containers = tuple(
+            _parse_container(line)
+            for line in query(
+                "Container query by project label",
+                ["ps", "--all", "--no-trunc", "--filter", label_filter,
+                 "--format", _CONTAINER_FORMAT],
+            )
+        )
+        collisions = tuple(
+            _parse_container(line)
+            for line in query(
+                "Container query by name prefix",
+                ["ps", "--all", "--no-trunc", "--filter", f"name=^{project_name}-",
+                 "--format", _CONTAINER_FORMAT],
+            )
+        )
+        networks = tuple(
+            _parse_network(line)
+            for line in query(
+                "Network query", ["network", "ls", "--filter", label_filter,
+                                  "--format", _NETWORK_FORMAT],
+            )
+        )
+        volumes = tuple(
+            line.strip()
+            for line in query(
+                "Volume query", ["volume", "ls", "--filter", label_filter,
+                                 "--format", _VOLUME_FORMAT],
+            )
+        )
+        return ResourceInventory(
+            project_name,
+            containers=containers,
+            name_collisions=collisions,
+            networks=tuple(item for item in networks if item is not None),
+            volumes=volumes,
+            errors=tuple(errors),
+        )
+
+
+def _parse_container(line: str) -> ContainerRecord:
+    fields = line.split(_FIELD_SEPARATOR)
+    if len(fields) != _CONTAINER_FIELD_COUNT:
+        return ContainerRecord(
+            id="",
+            name=fields[1] if len(fields) > 1 else "",
+            state="",
+            parse_error=f"Expected {_CONTAINER_FIELD_COUNT} fields, got {len(fields)}.",
+        )
+    identifier, name, state, project, working_dir, config_files, service, oneoff = fields
+    return ContainerRecord(
+        id=identifier,
+        name=name,
+        state=state,
+        project=project,
+        working_dir=working_dir,
+        config_files=config_files,
+        service=service,
+        oneoff=oneoff,
+    )
+
+
+def _parse_network(line: str) -> NetworkRecord | None:
+    fields = line.split(_FIELD_SEPARATOR)
+    if len(fields) != 2:
+        return None
+    return NetworkRecord(id=fields[0], name=fields[1])

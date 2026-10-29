@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from devdock.adapters import CommandResult, ComposeAdapter, run_command
+from devdock.adapters import CommandResult, ComposeAdapter, NetworkRecord, run_command
 from devdock.config import ProjectProfile
 from devdock.diagnostics import check_profile
 
@@ -149,3 +149,94 @@ def test_default_runner_never_uses_a_shell(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured.get("shell") in (None, False)
     assert captured["timeout"] == 1.5
     assert captured["capture_output"] is True and captured["check"] is False
+
+
+# --- resource inventory ---------------------------------------------------
+
+
+def container_line(*fields: str) -> str:
+    return "\t".join(fields)
+
+
+def test_inventory_queries_use_label_and_anchored_name_filters() -> None:
+    runner = RecordingRunner([OK, OK, OK, OK])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    inventory = adapter.list_project_resources("devdock-sample-0123456789ab")
+
+    assert inventory.errors == ()
+    argv = [call[0] for call in runner.calls]
+    label = "label=com.docker.compose.project=devdock-sample-0123456789ab"
+    assert argv[0][:5] == ["docker", "ps", "--all", "--no-trunc", "--filter"]
+    assert argv[0][5] == label
+    assert argv[1][5] == "name=^devdock-sample-0123456789ab-"
+    assert argv[2][:5] == ["docker", "network", "ls", "--filter", label]
+    assert argv[3][:5] == ["docker", "volume", "ls", "--filter", label]
+    for args in argv:
+        fmt = args[args.index("--format") + 1]
+        assert "{{json" not in fmt and "inspect" not in args
+        assert ".Env" not in fmt
+
+
+def test_inventory_rejects_unsafe_project_names_before_running_anything() -> None:
+    runner = RecordingRunner([])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    for bad in ("Has Space", "semi;colon", "", "-leading", "a|b"):
+        with pytest.raises(ValueError):
+            adapter.list_project_resources(bad)
+    assert runner.calls == []
+
+
+def test_inventory_parses_container_fields_and_flags_malformed_lines() -> None:
+    good = container_line(
+        "id1", "devdock-s-0123456789ab-web-1", "running",
+        "devdock-s-0123456789ab", "/proj", "/proj/compose.yaml", "web", "False",
+    )
+    bad = container_line("id2", "broken", "running")
+    runner = RecordingRunner(
+        [
+            CommandResult(0, f"{good}\n{bad}\n\n", ""),
+            OK,
+            CommandResult(0, "n1\tdevdock-s-0123456789ab_default\nmalformed\n", ""),
+            CommandResult(0, "devdock-s-0123456789ab_data\n", ""),
+        ]
+    )
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    inventory = adapter.list_project_resources("devdock-s-0123456789ab")
+
+    first, second = inventory.containers
+    assert first.id == "id1" and first.service == "web" and first.parse_error is None
+    assert first.config_files == "/proj/compose.yaml"
+    assert second.parse_error is not None and second.name == "broken"
+    assert inventory.networks == (NetworkRecord("n1", "devdock-s-0123456789ab_default"),)
+    assert inventory.volumes == ("devdock-s-0123456789ab_data",)
+
+
+def test_inventory_records_failed_queries_as_errors_without_output() -> None:
+    runner = RecordingRunner(
+        [
+            CommandResult(1, "", "permission denied: SECRET=1"),
+            subprocess.TimeoutExpired(["docker"], 10),
+            OK,
+            OK,
+        ]
+    )
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    inventory = adapter.list_project_resources("devdock-s-0123456789ab")
+
+    assert len(inventory.errors) == 2
+    assert "exit code 1" in inventory.errors[0]
+    assert "did not complete" in inventory.errors[1]
+    assert "SECRET" not in repr(inventory)
+
+
+def test_inventory_without_docker_cli_reports_an_error() -> None:
+    adapter = ComposeAdapter(RecordingRunner([]), locate=lambda _: None)
+
+    inventory = adapter.list_project_resources("devdock-s-0123456789ab")
+
+    assert inventory.errors == ("Docker CLI is not available.",)
+    assert inventory.containers == ()

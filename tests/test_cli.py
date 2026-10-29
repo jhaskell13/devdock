@@ -115,3 +115,14 @@ def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Could not create project directory" in result.stderr
 
+
+
+def test_inspect_reports_the_compose_project_name_devdock_will_manage(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: Sample App\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["inspect", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Compose project name: devdock-sample-app-" in result.stdout

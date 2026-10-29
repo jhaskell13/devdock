@@ -86,6 +86,48 @@ class ConfigValidation:
         return self.outcome == "valid"
 
 
+@dataclass(frozen=True)
+class ContainerRecord:
+    """Identity and ownership labels of one container; never its environment.
+
+    ``parse_error`` is set when the runtime's output for this container could
+    not be parsed. Ownership rules treat such records as conflicts.
+    """
+
+    id: str
+    name: str
+    state: str
+    project: str = ""
+    working_dir: str = ""
+    config_files: str = ""
+    service: str = ""
+    oneoff: str = ""
+    parse_error: str | None = None
+
+
+@dataclass(frozen=True)
+class NetworkRecord:
+    """A network carrying the project label."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class ResourceInventory:
+    """Everything found under one project name, plus any query that failed.
+
+    ``errors`` are safe summaries (which query, exit status); never raw output.
+    """
+
+    project_name: str
+    containers: tuple[ContainerRecord, ...] = ()
+    name_collisions: tuple[ContainerRecord, ...] = ()
+    networks: tuple[NetworkRecord, ...] = ()
+    volumes: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
 class RuntimeAdapter(Protocol):
     """Inspect-side operations every runtime adapter provides."""
 
@@ -95,4 +137,8 @@ class RuntimeAdapter(Protocol):
 
     def validate_config(self, config_path: Path, *, project_root: Path) -> ConfigValidation:
         """Ask the runtime to parse ``config_path`` from ``project_root``."""
+        ...
+
+    def list_project_resources(self, project_name: str) -> ResourceInventory:
+        """List containers, networks, and volumes under ``project_name`` without mutation."""
         ...

@@ -13,8 +13,8 @@ from typing import Literal
 
 from devdock.adapters import ComposeAdapter, RuntimeAdapter
 from devdock.config import ProjectProfile
-from devdock.discovery import COMPOSE_NAMES
 from devdock.metadata import read_python_metadata
+from devdock.ownership import compose_path_for
 
 PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.(\d+))?$")
 Severity = Literal["PASS", "WARN", "FAIL", "SKIP"]
@@ -62,12 +62,6 @@ def _compose_skipped(code: str, check_name: str, reason: str) -> Finding:
         f"{check_name} was not run.",
         evidence=(reason,),
     )
-
-
-def _compose_path(profile: ProjectProfile, root: Path) -> Path | None:
-    if profile.compose_file is not None:
-        return root / profile.compose_file
-    return next((root / name for name in COMPOSE_NAMES if (root / name).is_file()), None)
 
 
 def _inside_project(path: Path, root: Path) -> bool:
@@ -123,7 +117,7 @@ def _check_compose(
         )
         return
 
-    compose_path = _compose_path(profile, root)
+    compose_path = compose_path_for(profile, root)
     compose_file_ready = False
     if compose_path is None:
         findings.append(

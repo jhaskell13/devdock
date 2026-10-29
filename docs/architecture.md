@@ -14,9 +14,14 @@ Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
 
 Runtime adapter (adapters/)
-  ├─ RuntimeAdapter protocol: capability detection and config validation
+  ├─ RuntimeAdapter protocol: capability detection, config validation, resource inventory
   ├─ ComposeAdapter: argument arrays, bounded timeouts, injectable CommandRunner
   └─ results carry status only; captured output is never copied into findings
+
+Ownership (ownership.py)
+  ├─ deterministic Compose project name: devdock-<slug>-<root digest>
+  ├─ classifies inventoried containers against expected Compose labels
+  └─ assessment is safe only with zero conflicts and zero inventory errors
 
 Diagnostics
   ├─ structured findings with stable code, severity, evidence, and remediation
@@ -45,7 +50,7 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 
 ## Adapter boundary
 
-All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns `ComposeCapabilities` and `ConfigValidation` values that contain exit status and executable paths but no captured output. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. Lifecycle methods (start, status, stop, resource identification) are added to the protocol by the milestone that implements them, so the contract never advertises unimplemented behavior. Lifecycle state should identify only resources DevDock created. Destructive cleanup and volume removal require a separate preview/authorization design.
+All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns `ComposeCapabilities` and `ConfigValidation` values that contain exit status and executable paths but no captured output. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. Lifecycle methods (start, status, stop, resource identification) are added to the protocol by the milestone that implements them, so the contract never advertises unimplemented behavior. `ownership.py` holds the pure rules for what DevDock owns: the derived project name and the label values Compose writes when DevDock runs it with an absolute `--project-directory` and `-f`. The adapter's inventory returns only identity fields and those labels. Lifecycle commands print the assessment before acting and refuse when any resource under the name is not provably theirs. Destructive cleanup and volume removal require a separate preview/authorization design.
 
 SQLite is deferred until the product needs durable snapshots or recovery state. The first milestone has no daemon, web UI, cloud connection, credential store, or AI features.
 

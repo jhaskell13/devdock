@@ -5,6 +5,9 @@ from devdock.adapters.base import (
     CommandRunner,
     ComposeCapabilities,
     ConfigValidation,
+    ContainerRecord,
+    NetworkRecord,
+    ResourceInventory,
     RuntimeAdapter,
 )
 from devdock.adapters.compose import ComposeAdapter, run_command
@@ -15,6 +18,9 @@ __all__ = [
     "ComposeAdapter",
     "ComposeCapabilities",
     "ConfigValidation",
+    "ContainerRecord",
+    "NetworkRecord",
+    "ResourceInventory",
     "RuntimeAdapter",
     "run_command",
 ]
