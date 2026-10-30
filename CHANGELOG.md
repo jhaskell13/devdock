@@ -22,6 +22,8 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- A readiness probe with a non-ASCII `path` crashed `devdock status` with a traceback instead of reporting a result: the HTTP client rejects such a request with a `ValueError`, which is neither a transport error nor one the probe module raises. Those paths are now refused when the profile loads, a `#` fragment is refused with them, and the probe treats any remaining `ValueError` as an unreadable response rather than letting it escape a read-only command.
+- The Compose health value was the one piece of runtime text interpolated into a status report. It is now classified against a fixed set like every other source.
 - Parsing JSON from Docker raised an unhandled `RecursionError` on deeply nested input, which is not a decode error and so escaped as a traceback. Compose echoes `x-` extension fields verbatim and they accept any structure, so the nesting can come from a project file. Both the configuration and service-status parsers now refuse it.
 - `devdock init` templated the project name into YAML unquoted, so a directory named `true`, `1.0`, or `a: b` produced a profile that failed validation. The profile is now serialized.
 - `down` reported `DOWN_PARTIAL` after correctly leaving an undeclared running container in place, because that container kept the project network alive. The plan now says the network will stay, and the verification expects it.

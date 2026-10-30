@@ -69,13 +69,13 @@ Service names, both as keys and as dependency targets, must match `[a-zA-Z0-9._-
 | `service_started` | The dependency is running. |
 | `service_healthy` | The dependency has a Compose health check and it reports healthy. |
 | `service_completed_successfully` | The dependency exited with code `0`. |
-| `service_ready` | The dependency satisfies *every* readiness source DevDock knows for it, including the probes below. This condition is DevDock's own; Compose has no equivalent. |
+| `service_ready` | The dependency satisfies *every* readiness source DevDock knows for it, including the probes below. A dependency with no readiness source at all counts as ready once it is running, since there is nothing further to check and the alternative is a wait that can never end. This condition is DevDock's own; Compose has no equivalent. |
 
 #### How the two sources of dependencies combine
 
 The Compose file and the profile both declare dependencies, and DevDock honors both rather than letting one replace the other. An edge declared in both places must satisfy both conditions.
 
-`service_started`, `service_healthy`, and `service_ready` form one scale: each implies the one before it, so the stricter condition wins. `service_completed_successfully` absorbs `service_started`, because a service that exited successfully did start. It **contradicts** `service_healthy` and `service_ready`, which require the service to still be running; DevDock reports that contradiction rather than picking one.
+`service_started`, `service_healthy`, and `service_ready` form one scale: each implies the one before it, so the stricter condition wins. One exception is carried separately rather than merged away: for a dependency that has *no* health check, `service_ready` is weaker than `service_healthy`, because readiness falls back to "running with nothing to check" while a health wait could never be met. So an edge that asked for health anywhere keeps that requirement on top of the merged condition, and adding a declaration can never make an edge laxer than one of its own halves. `service_completed_successfully` absorbs `service_started`, because a service that exited successfully did start. It **contradicts** `service_healthy` and `service_ready`, which require the service to still be running; DevDock reports that contradiction rather than picking one.
 
 The merged graph must produce a startup order. These are reported together in one pass, so a project with several mistakes is not fixed one error at a time:
 
@@ -105,9 +105,11 @@ The startup order itself is a sequence of layers. Every service in a layer may s
 | `port` | both | Required strict integer from `1` through `65535`. This is the port **published on the host**, not the port inside the container, because DevDock probes from the host. |
 | `host` | both | Optional, default `127.0.0.1`. Must be loopback: a loopback IP address or `localhost`. Any other value is rejected when the profile loads, so a profile arriving with a cloned repository cannot direct DevDock at another machine. `localhost` is resolved by the host's own configuration. |
 | `timeout` | both | Optional seconds for one probe attempt, greater than `0` and at most `60`. Default `2`. |
-| `path` | `http` | Optional request target, default `/`. Must begin with `/`, be at most 2000 characters, and contain no whitespace or control characters, so a declared path cannot append a line to the request. |
+| `path` | `http` | Optional request target, default `/`. Must begin with `/`, be at most 2000 characters, be ASCII, and contain no whitespace, control characters, or `#`. Whitespace and control characters would let a declared path append a line to the request; a non-ASCII path cannot be sent at all; a fragment is stripped before sending, so the probe would contact something other than the target it reports. Percent-encode anything else. |
 | `method` | `http` | Optional, `GET` or `HEAD`. Default `GET`. |
 | `expect_status` | `http` | Optional list of accepted status codes from `100` through `599`. Omit it to accept `200` through `399`. An empty list is rejected as ambiguous. |
+
+A service may declare at most eight readiness probes. Every one is attempted, in order, on each status report and on each poll of a wait.
 
 HTTP probes use plain `http://`. A TLS endpoint should use a `tcp` probe for now; DevDock will not add an option to skip certificate verification.
 

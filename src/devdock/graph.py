@@ -84,13 +84,27 @@ class Dependency:
     condition: DependencyCondition
     sources: tuple[DependencySource, ...]
     required: bool = True
+    requires_health: bool = False
+    """Whether any source asked for ``service_healthy``, even after merging.
+
+    ``service_ready`` outranks ``service_healthy`` for a service that has a
+    health check, because health is then one of the sources readiness is made
+    of. For a service that has none it is *weaker*: readiness falls back to
+    "running and nothing to check", while a health wait could never be met at
+    all. Merging the two into ``service_ready`` alone would therefore let a
+    declaration make an edge laxer than one of its own halves, so the
+    requirement is carried separately and checked on top of the condition.
+    """
 
     def describe(self) -> str:
         origin = " and ".join(self.sources)
         optional = "" if self.required else ", optional"
+        health = (
+            " and healthy" if self.requires_health and self.condition != "service_healthy" else ""
+        )
         return (
             f"{self.service} depends on {self.depends_on} "
-            f"({self.condition}, from {origin}{optional})"
+            f"({self.condition}{health}, from {origin}{optional})"
         )
 
 
@@ -229,6 +243,7 @@ def _merge_edges(
     """Combine both sources edge by edge and validate each merged edge."""
 
     collected: dict[tuple[str, str], tuple[DependencyCondition, list[DependencySource]]] = {}
+    health_wanted: set[tuple[str, str]] = set()
     problems: list[GraphProblem] = []
     pairs: list[tuple[DependencySource, Mapping[str, Mapping[str, DependencyCondition]]]] = [
         ("compose", compose_dependencies),
@@ -241,6 +256,8 @@ def _merge_edges(
             for target in sorted(declarations[service]):
                 condition = declarations[service][target]
                 key = (service, target)
+                if condition == "service_healthy":
+                    health_wanted.add(key)
                 existing = collected.get(key)
                 if existing is None:
                     collected[key] = (condition, [source])
@@ -277,7 +294,7 @@ def _merge_edges(
                 )
             )
             continue
-        if condition == "service_healthy" and target in without_healthcheck:
+        if (service, target) in health_wanted and target in without_healthcheck:
             problems.append(
                 GraphProblem(
                     "healthcheck_missing",
@@ -300,7 +317,16 @@ def _merge_edges(
         # An edge the profile declares is always required: declaring it is an
         # explicit request, which outranks Compose's "warn only" marking.
         required = (service, target) not in optional_edges or "profile" in sources
-        dependencies.append(Dependency(service, target, condition, tuple(sources), required))
+        dependencies.append(
+            Dependency(
+                service,
+                target,
+                condition,
+                tuple(sources),
+                required,
+                requires_health=(service, target) in health_wanted,
+            )
+        )
     return tuple(dependencies), problems
 
 

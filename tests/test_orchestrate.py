@@ -789,3 +789,159 @@ def test_a_missing_service_behind_a_dependency_is_not_charged_for_the_wait() -> 
     web = next(item for item in outcome.progress if item.service == "web")
     assert outcome.status == "timed_out"
     assert web.unblocked_at is not None and web.unblocked_at > 0
+
+
+# --- regressions found by the milestone audit ---------------------------
+
+
+def test_a_service_whose_container_disappears_after_success_ends_the_wait() -> None:
+    """Compose removes and recreates containers; the wait must not wedge on it."""
+
+    script = Script(
+        Snapshot(
+            (
+                status("web", sources=[health(True)]),
+                status("slow", "starting", sources=[health(False)]),
+            )
+        ),
+        Snapshot((status("web", "missing"), status("slow", "starting", sources=[health(False)]))),
+    )
+
+    outcome, clock = run(graph_for(["web", "slow"]), script, ready_timeout=600, deadline=600)
+
+    assert outcome.status == "regressed"
+    assert any("no longer exists" in line for line in outcome.detail)
+    assert clock.time < 10
+
+
+def test_a_flapping_dependency_cannot_make_a_timeout_unreachable() -> None:
+    """Resetting the dependent's clock on every relapse made the budget infinite."""
+
+    def pair(db_ready: bool) -> Snapshot:
+        return Snapshot(
+            (
+                status("db", "ready" if db_ready else "starting", sources=[health(db_ready)]),
+                status("web", "starting", sources=[health(False)]),
+            )
+        )
+
+    class Oscillate:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> Snapshot:
+            self.calls += 1
+            return pair(self.calls % 2 == 1)
+
+    graph = graph_for(["db", "web"], {"web": {"db": "service_ready"}})
+    outcome, clock = run(graph, Oscillate(), ready_timeout=30, deadline=600)  # type: ignore[arg-type]
+
+    assert outcome.status in {"timed_out", "unstable"}
+    assert clock.time < 600, "the wait must end on a named cause, not the global deadline"
+
+
+def test_waiting_for_health_on_a_completed_task_is_called_out() -> None:
+    """The one-shot pattern with the wrong condition: it can never be healthy."""
+
+    graph = graph_for(["migrate", "web"], {"web": {"migrate": "service_healthy"}})
+    script = Script(
+        Snapshot((status("migrate", "exited_ok", exit_code=0), status("web", "running")))
+    )
+
+    outcome, clock = run(graph, script, ready_timeout=600, deadline=600)
+
+    assert outcome.status == "unsatisfiable"
+    assert any("ran to completion" in line for line in outcome.detail)
+    assert clock.time < 600
+
+
+def test_waiting_for_readiness_of_a_completed_task_is_called_out() -> None:
+    graph = graph_for(["migrate", "web"], {"web": {"migrate": "service_ready"}})
+    script = Script(
+        Snapshot((status("migrate", "exited_ok", exit_code=0), status("web", "running")))
+    )
+
+    outcome, _ = run(graph, script, ready_timeout=600, deadline=600)
+
+    assert outcome.status == "unsatisfiable"
+    assert any("service_completed_successfully instead" in line for line in outcome.detail)
+
+
+def test_an_endlessly_flapping_service_is_called_unstable_not_slow() -> None:
+    class Flap:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> Snapshot:
+            self.calls += 1
+            ready = self.calls % 2 == 1
+            return Snapshot(
+                (
+                    status("web", "ready" if ready else "starting", sources=[health(ready)]),
+                    status("slow", "starting", sources=[health(False)]),
+                )
+            )
+
+    outcome, clock = run(graph_for(["web", "slow"]), Flap(), ready_timeout=600, deadline=600)  # type: ignore[arg-type]
+
+    assert outcome.status == "unstable"
+    assert any("lost it 3 times" in line for line in outcome.detail)
+    assert clock.time < 600
+
+
+def test_a_deadline_report_always_names_something_to_look_at() -> None:
+    """It once rendered "Still not ready: ." with no service at all."""
+
+    script = Script(Snapshot((status("web", "starting", sources=[health(False)]),)))
+
+    outcome, _ = run(graph_for(["web"]), script, ready_timeout=600, deadline=20)
+
+    assert outcome.status == "deadline_exceeded"
+    assert "Still not ready: web." in outcome.detail
+
+
+def test_a_crash_after_success_is_a_failure_not_a_flap() -> None:
+    script = Script(
+        Snapshot(
+            (
+                status("web", sources=[health(True)]),
+                status("slow", "starting", sources=[health(False)]),
+            )
+        ),
+        Snapshot(
+            (
+                status("web", "stopped", exit_code=1),
+                status("slow", "starting", sources=[health(False)]),
+            )
+        ),
+    )
+
+    outcome, _ = run(graph_for(["web", "slow"]), script, ready_timeout=600, deadline=600)
+
+    assert outcome.status == "regressed"
+    web = next(item for item in outcome.progress if item.service == "web")
+    assert web.flaps == 0, "dying once is not flapping"
+
+
+def test_a_declared_ready_edge_does_not_drop_a_health_requirement() -> None:
+    """Adding a profile line must not make an edge laxer than the Compose half.
+
+    service_ready outranks service_healthy for a service that has a health
+    check, but for one that has none it is weaker, so the merge alone would
+    release the dependent against a service that was never healthy.
+    """
+
+    graph = build_graph(
+        ["db", "web"],
+        {"web": {"db": "service_healthy"}},
+        {"web": {"db": "service_ready"}},
+    )
+    assert isinstance(graph, DependencyGraph)
+    edge = graph.dependencies[0]
+    assert (edge.condition, edge.requires_health) == ("service_ready", True)
+
+    script = Script(Snapshot((status("db", "running"), status("web", "running"))))
+    outcome, _ = run(graph, script, ready_timeout=600, deadline=600)
+
+    assert outcome.status == "unsatisfiable"
+    assert any("reports no health status" in line for line in outcome.detail)

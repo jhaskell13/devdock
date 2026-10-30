@@ -21,6 +21,7 @@ SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]{1,63}$")
 PROBE_TIMEOUT_SECONDS = 2.0
 MAX_PROBE_TIMEOUT_SECONDS = 60.0
 MAX_PATH_LENGTH = 2000
+MAX_PROBES_PER_SERVICE = 8
 
 DependencyCondition = Literal[
     "service_started",
@@ -107,6 +108,17 @@ class HttpReadiness(ReadinessProbeBase):
         # would let a profile append headers of its own choosing.
         if _has_control_characters(value) or any(character.isspace() for character in value):
             raise ValueError("path must not contain whitespace or control characters")
+        # A request target is sent as ASCII bytes. A non-ASCII path reaches the
+        # HTTP client and fails there, which is a crash rather than a probe
+        # result, so it is refused while there is still somewhere good to say
+        # so. Percent-encode such a path.
+        if not value.isascii():
+            raise ValueError("path must be ASCII; percent-encode any other characters")
+        # A fragment is stripped before the request is sent, so a path
+        # containing one would be reported as the probe target while a
+        # different resource was actually requested.
+        if "#" in value:
+            raise ValueError("path must not contain '#'; a fragment is not sent to the server")
         return value
 
     @field_validator("expect_status")
@@ -140,7 +152,11 @@ class ServiceProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     depends_on: dict[str, DependencyCondition] = Field(default_factory=dict)
-    readiness: list[ReadinessProbe] = Field(default_factory=list)
+    # Capped because every probe is attempted, serially, on each status report
+    # and each poll of a wait. An unbounded list in a profile that arrived with
+    # a repository would be a long serial scan of loopback ports on someone
+    # else's machine, and a slow command for no stated benefit.
+    readiness: list[ReadinessProbe] = Field(default_factory=list, max_length=MAX_PROBES_PER_SERVICE)
 
     @field_validator("depends_on", mode="before")
     @classmethod

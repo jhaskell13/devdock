@@ -326,6 +326,13 @@ def run_probe(probe: ReadinessProbeUnion, *, network: Network | None = None) -> 
         return ProbeResult(False, MALFORMED)
     except OSError as error:
         return ProbeResult(False, _transport_detail(error, timeout))
+    except ValueError:
+        # The HTTP client rejects a request it cannot encode or parse by
+        # raising ValueError, which is neither a transport error nor one of
+        # this module's own. A probe must always return a result: escaping
+        # here would replace the readiness report with a traceback, in a
+        # command that is read-only and expected not to fail.
+        return ProbeResult(False, MALFORMED)
     if not MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS:
         return ProbeResult(False, MALFORMED)
     if probe.accepts(status):

@@ -73,6 +73,18 @@ class SourceResult:
         return f"{self.target} {self.detail}"
 
 
+# What the runtime is allowed to say about health. The value comes from
+# Docker, so it is classified against this set rather than repeated: every
+# other source in a report draws its wording from a fixed vocabulary, and this
+# one must not be the exception that puts runtime text on the terminal.
+HEALTH_DETAIL: dict[str, str] = {
+    "healthy": "reports healthy",
+    "unhealthy": "reports unhealthy",
+    "starting": "reports starting",
+}
+UNRECOGNIZED_HEALTH = "reported a health value DevDock does not recognize"
+
+
 def health_source(health: str) -> SourceResult | None:
     """Turn a reported Compose health value into a source, or ``None`` if absent.
 
@@ -88,7 +100,7 @@ def health_source(health: str) -> SourceResult | None:
         "compose_health",
         COMPOSE_HEALTH_TARGET,
         normalized == "healthy",
-        f"reports {normalized}",
+        HEALTH_DETAIL.get(normalized, UNRECOGNIZED_HEALTH),
     )
 
 

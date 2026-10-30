@@ -491,3 +491,21 @@ def test_the_report_shows_what_passed_too_not_only_what_failed() -> None:
     assert "  web: [PASS] http GET 127.0.0.1:8080/healthz answered 200" in "\n".join(
         report.explain()
     )
+
+
+@pytest.mark.parametrize(
+    ("reported", "expected"),
+    [
+        ("healthy", "reports healthy"),
+        ("unhealthy", "reports unhealthy"),
+        ("starting", "reports starting"),
+        ("\x1b[2Jwiped", "reported a health value DevDock does not recognize"),
+        ("something-new", "reported a health value DevDock does not recognize"),
+    ],
+)
+def test_the_health_detail_is_classified_rather_than_echoed(reported: str, expected: str) -> None:
+    """It is the one source whose value comes from the runtime, not from DevDock."""
+
+    result = health_source(reported)
+
+    assert result is not None and result.detail == expected

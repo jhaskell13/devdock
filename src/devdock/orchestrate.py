@@ -30,6 +30,7 @@ WaitStatus = Literal[
     "deadline_exceeded",  # the whole wait ran out of time
     "failed",  # a service entered a state it cannot come back from
     "regressed",  # a service that had succeeded left that state
+    "unstable",  # a service kept losing readiness and regaining it
     "unsatisfiable",  # a declared condition can never be met
     "cancelled",  # the caller asked to stop
     "unobservable",  # the runtime stopped answering
@@ -220,8 +221,24 @@ def condition_met(condition: DependencyCondition, item: ServiceProgress) -> bool
     )
 
 
+def edge_met(edge: Dependency, item: ServiceProgress) -> bool:
+    """Whether one edge is satisfied, condition and health requirement together."""
+
+    if edge.requires_health and not _health_passing(item):
+        return False
+    return condition_met(edge.condition, item)
+
+
+def _health_passing(item: ServiceProgress) -> bool:
+    return any(source.source == "compose_health" and source.passed for source in item.sources)
+
+
 def condition_unsatisfiable(
-    condition: DependencyCondition, item: ServiceProgress, now: float
+    condition: DependencyCondition,
+    item: ServiceProgress,
+    now: float,
+    *,
+    requires_health: bool = True,
 ) -> str | None:
     """Why a condition can never be met, or ``None`` while it still might be.
 
@@ -230,7 +247,7 @@ def condition_unsatisfiable(
     timeout instead of the cause.
     """
 
-    if condition == "service_healthy":
+    if condition in {"service_healthy", "service_ready"} and requires_health:
         reports_health = any(source.source == "compose_health" for source in item.sources)
         running_long_enough = (
             item.running_since is not None and now - item.running_since >= HEALTH_REPORT_GRACE
@@ -246,11 +263,18 @@ def condition_unsatisfiable(
             f"{item.service} exited with code {item.exit_code}, so it did not complete "
             "successfully. Correct the service, then retry."
         )
-    if condition in {"service_healthy", "service_ready"} and item.readiness == "stopped":
-        return (
-            f"{item.service} exited with code {item.exit_code} and cannot become "
-            f"{'healthy' if condition == 'service_healthy' else 'ready'}."
-        )
+    if condition in {"service_healthy", "service_ready"}:
+        wanted = "healthy" if condition == "service_healthy" else "ready"
+        if item.readiness == "stopped":
+            return f"{item.service} exited with code {item.exit_code} and cannot become {wanted}."
+        if item.readiness == "exited_ok":
+            # The one-shot task pattern, and an easy mistake: a job that runs
+            # to completion can never be healthy or ready, so a dependent
+            # waiting on either would wait out the whole deadline.
+            return (
+                f"{item.service} ran to completion and is no longer running, so it cannot "
+                f"become {wanted}. Depend on service_completed_successfully instead."
+            )
     return None
 
 
@@ -270,7 +294,10 @@ def _apply(item: ServiceProgress, status: ServiceStatus, now: float, require_rea
 
     now_success = _is_success(item, require_ready)
     item.successes = item.successes + 1 if now_success else 0
-    if was_success and not now_success and item.reached_success:
+    # Losing readiness counts as a flap only when the service is still in the
+    # running, so a service that became ready and then died is described as
+    # having failed rather than as having flapped once on its way out.
+    if was_success and not now_success and item.reached_success and _regression(item) is None:
         item.flaps += 1
 
 
@@ -330,6 +357,12 @@ def _regression(item: ServiceProgress) -> str | None:
         return f"{item.service} had become ready and is now unhealthy."
     if item.readiness == "unknown":
         return f"{item.service} had become ready and is now in a state DevDock does not model."
+    if item.readiness == "missing":
+        # Its container was removed while the wait was running. Nothing is
+        # going to bring it back, and without this the service is in none of
+        # the settled, failed, regressed or overdue sets at once, so the wait
+        # has nothing left to say about it until the global deadline.
+        return f"{item.service} had become ready and its container no longer exists."
     return None
 
 
@@ -343,7 +376,7 @@ def _blocking(graph: DependencyGraph, service: str, tracker: _Tracker) -> tuple[
     return tuple(
         edge
         for edge in graph.dependencies_of(service)
-        if edge.required and not condition_met(edge.condition, tracker.for_service(edge.depends_on))
+        if edge.required and not edge_met(edge, tracker.for_service(edge.depends_on))
     )
 
 
@@ -359,10 +392,10 @@ def wait_for_ready(
 ) -> WaitOutcome:
     """Poll until every service has settled, or until something says to stop.
 
-    A service's own budget starts when it is running *and* its dependencies
-    are satisfied, not when the wait began. Without that rule a service deep
-    in the graph is charged for the time its ancestors took and times out for
-    someone else's slowness.
+    A service's own budget starts when its dependencies are satisfied, not
+    when the wait began. Without that rule a service deep in the graph is
+    charged for the time its ancestors took and times out for someone else's
+    slowness.
     """
 
     ticker = RealClock() if clock is None else clock
@@ -415,7 +448,7 @@ def wait_for_ready(
             if settled is not None:
                 return _outcome(*settled, tracker=tracker, elapsed=now)
 
-        expired = _expired(graph, tracker, now, ready_timeout, deadline)
+        expired = _expired(graph, tracker, now, ready_timeout, deadline, require_ready)
         if expired is not None:
             return _outcome(*expired, tracker=tracker, elapsed=now)
 
@@ -437,26 +470,30 @@ def _evaluate(
     regressions: list[str] = []
     failures: list[str] = []
     impossible: list[str] = []
+    unstable: list[str] = []
 
     for name in graph.nodes:
         item = tracker.for_service(name)
         item.blocked_by = _blocking(graph, name, tracker)
 
-        # The service's own clock starts the moment nothing is holding it
-        # back, whether or not its container exists yet. Requiring it to be
-        # running instead would leave a service that never appears at all with
-        # no budget to exceed, so it would sit until the global deadline and
-        # then be reported as the whole project running late rather than as
-        # the one service that never arrived. Cleared again if a dependency
-        # stops being satisfied, so nothing is charged for a relapse upstream.
-        if item.blocked_by:
-            item.unblocked_at = None
-        elif item.unblocked_at is None:
+        # The service's own clock starts the first time nothing is holding it
+        # back, whether or not its container exists yet, and then keeps
+        # running. Requiring it to be running would leave a service that never
+        # appears with no budget to exceed; restarting the clock whenever a
+        # dependency relapses would be kinder but makes the timeout
+        # unreachable, because a dependency crossing its condition boundary
+        # faster than the budget resets the clock forever. A budget that can
+        # never expire is worse than one that is occasionally harsh: it turns
+        # a named timeout into the global deadline with nothing to point at.
+        if not item.blocked_by and item.unblocked_at is None:
             item.unblocked_at = now
 
         for edge in item.blocked_by:
             reason = condition_unsatisfiable(
-                edge.condition, tracker.for_service(edge.depends_on), now
+                edge.condition,
+                tracker.for_service(edge.depends_on),
+                now,
+                requires_health=edge.requires_health or edge.condition == "service_healthy",
             )
             if reason is not None:
                 impossible.append(f"{name} cannot start: {reason}")
@@ -470,6 +507,18 @@ def _evaluate(
         regression = _regression(item) if item.reached_success else None
         if regression is not None:
             regressions.append(regression)
+            continue
+
+        if item.flaps >= FLAP_THRESHOLD:
+            # Waited through up to this point, because a service that steadies
+            # after a wobble is ready. Past it, the wobble is the answer: the
+            # service is not stable, and it would otherwise never be settled,
+            # never be a regression, and never overdue -- it would run out the
+            # global deadline and be reported as the project being slow.
+            unstable.append(
+                f"{name} has become ready and lost it {item.flaps} times. It is running but "
+                "not stable."
+            )
             continue
 
         failure = _failure(item)
@@ -488,6 +537,17 @@ def _evaluate(
             "unsatisfiable",
             "Refusing to keep waiting: a declared condition can never be met.",
             tuple(impossible),
+        )
+    if unstable:
+        return (
+            "unstable",
+            "A service became ready and did not stay that way.",
+            tuple(unstable)
+            + (
+                "The project was left running. Inspect the service with "
+                "'docker compose logs'; a health check that is too strict or a service that "
+                "restarts under load both look like this.",
+            ),
         )
     if failures:
         return (
@@ -529,6 +589,7 @@ def _expired(
     now: float,
     ready_timeout: float,
     deadline: float,
+    require_ready: bool,
 ) -> tuple[WaitStatus, str, tuple[str, ...]] | None:
     """Report the global deadline first, then any service past its own budget."""
 
@@ -536,13 +597,21 @@ def _expired(
         waiting = sorted(
             item.service
             for item in tracker.progress.values()
-            if not item.reached_success and item.service in graph.nodes
+            if item.service in graph.nodes and not _settled(item, require_ready)
+        )
+        # Settled-ness rather than reached_success: a service can have
+        # succeeded earlier and be unsettled now, and naming nothing at all
+        # would leave the user with a timeout and no service to look at.
+        unsettled = (
+            "Still not ready: " + ", ".join(waiting) + "."
+            if waiting
+            else "No service is outstanding; run 'devdock status' to see the current state."
         )
         return (
             "deadline_exceeded",
             f"The whole startup exceeded its {deadline:g}s deadline.",
             (
-                "Still not ready: " + ", ".join(waiting) + ".",
+                unsettled,
                 "The project was left running. Raise --deadline, or run 'devdock status' to "
                 "see what it is waiting for.",
             ),

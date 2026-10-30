@@ -480,3 +480,18 @@ def test_a_tcp_probe_passes_where_an_http_probe_cannot(listening_port: int) -> N
 
     assert run_probe(tcp(port=listening_port)).passed
     assert not run_probe(http_probe(port=listening_port, timeout=5)).passed
+
+
+def test_a_request_the_http_client_rejects_is_a_result_not_a_traceback() -> None:
+    """ValueError is neither a transport error nor one of this module's own.
+
+    The profile validator rejects the paths that cause it, but a probe that
+    raised would replace a read-only report with a traceback, so the escape
+    hatch is closed here too.
+    """
+
+    class Raiser(FakeNetwork):
+        def fetch(self, *args: object, **kwargs: object) -> int:
+            raise ValueError("'ascii' codec can't encode character")
+
+    assert run_probe(http_probe(), network=Raiser()) == ProbeResult(False, MALFORMED)

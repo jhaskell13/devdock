@@ -283,3 +283,29 @@ def test_accepts_every_service_name_compose_itself_accepts(name: str) -> None:
     """
 
     assert name in _with_services({name: {}}).services
+
+
+@pytest.mark.parametrize("path", ["/café", "/日本", "/naïve"])
+def test_rejects_non_ascii_request_paths(path: str) -> None:
+    """They reach the HTTP client and raise there, which is a crash, not a result."""
+
+    with pytest.raises(ValidationError, match="ASCII"):
+        _with_services({"web": {"readiness": [{"type": "http", "port": 80, "path": path}]}})
+
+
+def test_rejects_a_fragment_in_a_request_path() -> None:
+    """It is stripped before sending, so the reported target would not be the one probed."""
+
+    with pytest.raises(ValidationError, match="fragment"):
+        _with_services(
+            {"web": {"readiness": [{"type": "http", "port": 80, "path": "/health#frag"}]}}
+        )
+
+
+def test_the_number_of_probes_per_service_is_capped() -> None:
+    """Each is attempted serially on every status report and every poll of a wait."""
+
+    probes = [{"type": "tcp", "port": 1000 + index} for index in range(9)]
+
+    with pytest.raises(ValidationError, match="at most 8"):
+        _with_services({"web": {"readiness": probes}})
