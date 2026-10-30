@@ -756,3 +756,36 @@ def test_a_wait_always_terminates_whatever_the_services_do(seed: int) -> None:
         "unsatisfiable",
     }
     assert clock.time <= 120 + MAX_POLL_INTERVAL
+
+
+def test_a_service_that_never_appears_times_out_on_its_own_budget() -> None:
+    """Not the global deadline: the answer is "web never arrived", not "the project is slow"."""
+
+    script = Script(Snapshot((status("db", sources=[health(True)]),)))
+
+    outcome, clock = run(graph_for(["db", "web"]), script, ready_timeout=15, deadline=600)
+
+    assert outcome.status == "timed_out"
+    assert "web did not become ready" in outcome.summary
+    assert clock.time == pytest.approx(15, abs=MAX_POLL_INTERVAL)
+    web = next(item for item in outcome.progress if item.service == "web")
+    assert web.readiness == "missing"
+
+
+def test_a_missing_service_behind_a_dependency_is_not_charged_for_the_wait() -> None:
+    script = Script(
+        Snapshot((status("db", "starting", sources=[health(False)]),)),
+        Snapshot((status("db", "starting", sources=[health(False)]),)),
+        Snapshot((status("db", sources=[health(True)]),)),
+    )
+
+    outcome, _ = run(
+        graph_for(["db", "web"], {"web": {"db": "service_healthy"}}),
+        script,
+        ready_timeout=15,
+        deadline=600,
+    )
+
+    web = next(item for item in outcome.progress if item.service == "web")
+    assert outcome.status == "timed_out"
+    assert web.unblocked_at is not None and web.unblocked_at > 0

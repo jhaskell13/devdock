@@ -442,14 +442,17 @@ def _evaluate(
         item = tracker.for_service(name)
         item.blocked_by = _blocking(graph, name, tracker)
 
-        # The service's own clock starts here: running, and nothing left to
-        # wait on. Cleared again if a dependency later stops being satisfied,
-        # so a service is never charged for a dependency's relapse.
-        if not item.blocked_by and item.running:
-            if item.unblocked_at is None:
-                item.unblocked_at = now
-        elif item.blocked_by:
+        # The service's own clock starts the moment nothing is holding it
+        # back, whether or not its container exists yet. Requiring it to be
+        # running instead would leave a service that never appears at all with
+        # no budget to exceed, so it would sit until the global deadline and
+        # then be reported as the whole project running late rather than as
+        # the one service that never arrived. Cleared again if a dependency
+        # stops being satisfied, so nothing is charged for a relapse upstream.
+        if item.blocked_by:
             item.unblocked_at = None
+        elif item.unblocked_at is None:
+            item.unblocked_at = now
 
         for edge in item.blocked_by:
             reason = condition_unsatisfiable(
