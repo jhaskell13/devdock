@@ -707,3 +707,304 @@ def test_daemon_probe_reports_a_stopped_daemon_as_unavailable() -> None:
     adapter = ComposeAdapter(RecordingRunner([OK, stopped]), locate=lambda _: "docker")
 
     assert adapter.detect_capabilities().daemon == "unavailable"
+
+
+# --- dependency listing -------------------------------------------------
+
+# A rendered configuration shaped like the one a real Compose emits, including
+# the fields DevDock must discard. The secret-looking values are here so the
+# tests can assert that none of them survives parsing.
+CONFIG_JSON = json.dumps(
+    {
+        "name": "sample",
+        "networks": {"default": {"name": "sample_default"}},
+        "services": {
+            "web": {
+                "image": "nginx:alpine",
+                "environment": {
+                    "SECRET_TOKEN": "${MY_SECRET}",
+                    "RESOLVED": "super-secret-from-env-file",
+                },
+                "env_file": [{"path": "/tmp/extra.env", "required": True}],
+                "volumes": [{"type": "bind", "source": "/home/someone/code", "target": "/app"}],
+                "depends_on": {
+                    "db": {"condition": "service_healthy", "required": True},
+                    "migrate": {
+                        "condition": "service_completed_successfully",
+                        "required": True,
+                    },
+                    "cache": {"condition": "service_started", "required": False},
+                },
+            },
+            "db": {"image": "postgres:16", "healthcheck": {"test": ["CMD", "true"]}},
+            "migrate": {"image": "busybox"},
+            "cache": {"image": "redis", "healthcheck": {"disable": True}},
+        },
+    }
+)
+
+
+def _dependency_adapter(result: CommandResult) -> tuple[ComposeAdapter, RecordingRunner]:
+    runner = RecordingRunner([result])
+    return ComposeAdapter(runner, locate=lambda _: "docker"), runner
+
+
+def test_dependency_listing_asks_compose_not_to_interpolate(tmp_path: Path) -> None:
+    """Without this flag Compose renders env_file contents and ${VAR} into the output."""
+
+    adapter, runner = _dependency_adapter(CommandResult(0, CONFIG_JSON, ""))
+
+    adapter.list_dependencies(project_root=tmp_path, compose_file=tmp_path / "compose.yaml")
+
+    args, cwd, timeout = runner.calls[0]
+    assert args[:2] == ["docker", "compose"]
+    assert args[-4:] == ["config", "--format", "json", "--no-interpolate"]
+    assert (cwd, timeout) == (tmp_path, 10.0)
+
+
+def test_dependency_listing_keeps_only_the_ordering_facts(tmp_path: Path) -> None:
+    adapter, _ = _dependency_adapter(CommandResult(0, CONFIG_JSON, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.usable
+    assert declared.services == ("cache", "db", "migrate", "web")
+    assert [
+        (item.service, item.depends_on, item.condition, item.required)
+        for item in declared.dependencies
+    ] == [
+        ("web", "cache", "service_started", False),
+        ("web", "db", "service_healthy", True),
+        ("web", "migrate", "service_completed_successfully", True),
+    ]
+    assert declared.healthcheck_declared == frozenset({"db"})
+    assert declared.healthcheck_disabled == frozenset({"cache"})
+
+
+def test_nothing_from_the_configuration_survives_except_those_facts(tmp_path: Path) -> None:
+    """The document describes images, mounts, and environment. None may be retained."""
+
+    adapter, _ = _dependency_adapter(CommandResult(0, CONFIG_JSON, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    rendered = repr(declared)
+    for leaked in (
+        "MY_SECRET",
+        "super-secret-from-env-file",
+        "/tmp/extra.env",
+        "/home/someone/code",
+        "nginx:alpine",
+        "postgres:16",
+        "SECRET_TOKEN",
+    ):
+        assert leaked not in rendered, f"{leaked} survived parsing"
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (CommandResult(1, "", "services.web: secret value /home/me/.env failed"), "exit code 1"),
+        (CommandResult(0, "not json at all", ""), "not valid JSON"),
+        (CommandResult(0, '"a string"', ""), "not an object"),
+        (CommandResult(0, '{"services": []}', ""), "services as an object"),
+        (CommandResult(0, '{"services": {"web": "nope"}}', ""), "a service in a form"),
+    ],
+)
+def test_unreadable_configurations_report_the_failure_not_the_content(
+    tmp_path: Path, result: CommandResult, expected: str
+) -> None:
+    adapter, _ = _dependency_adapter(result)
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error is not None
+    assert expected in declared.error
+    assert not declared.usable
+
+
+def test_a_failed_listing_never_quotes_the_runtime_message(tmp_path: Path) -> None:
+    hostile = "error: DATABASE_URL=postgres://user:hunter2@localhost/db is invalid"
+    adapter, _ = _dependency_adapter(CommandResult(1, hostile, hostile))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error == "Compose dependency listing failed with exit code 1."
+    assert "hunter2" not in repr(declared)
+
+
+def test_an_oversized_configuration_is_refused_rather_than_parsed(tmp_path: Path) -> None:
+    adapter, _ = _dependency_adapter(CommandResult(0, "{" + " " * 4_000_001, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error is not None and "too large" in declared.error
+
+
+def test_the_short_list_form_is_still_understood(tmp_path: Path) -> None:
+    """Current Compose normalizes it away; an older one may not."""
+
+    document = json.dumps(
+        {"services": {"web": {"depends_on": ["db", "cache"]}, "db": {}, "cache": {}}}
+    )
+    adapter, _ = _dependency_adapter(CommandResult(0, document, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert [(item.depends_on, item.condition) for item in declared.dependencies] == [
+        ("cache", "service_started"),
+        ("db", "service_started"),
+    ]
+
+
+def test_a_condition_this_version_cannot_order_against_is_reported(tmp_path: Path) -> None:
+    """A newer Compose must not be silently downgraded to 'started'."""
+
+    document = json.dumps(
+        {"services": {"web": {"depends_on": {"db": {"condition": "service_warm"}}}, "db": {}}}
+    )
+    adapter, _ = _dependency_adapter(CommandResult(0, document, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert not declared.usable
+    assert declared.error is None
+    assert declared.unsupported == (
+        "Compose reported the dependency condition service_warm, which this version of "
+        "DevDock cannot order against.",
+    )
+
+
+def test_an_unprintable_condition_is_described_rather_than_echoed(tmp_path: Path) -> None:
+    document = json.dumps(
+        {"services": {"web": {"depends_on": {"db": {"condition": "\x1b[2Jwiped"}}}, "db": {}}}
+    )
+    adapter, _ = _dependency_adapter(CommandResult(0, document, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.unsupported == (
+        "Compose reported the dependency condition an unprintable value, which this version "
+        "of DevDock cannot order against.",
+    )
+    # The unrecognized value itself is the one field here that came from
+    # outside a fixed vocabulary, so it must not be retained on the edge.
+    assert "wiped" not in repr(declared)
+    assert declared.dependencies == ()
+
+
+@pytest.mark.parametrize("name", ["bad name", "web\nservice", "a" * 64, "sql\x1b[2J", "", "üñî"])
+def test_service_names_compose_could_not_have_produced_are_refused(
+    tmp_path: Path, name: str
+) -> None:
+    document = json.dumps({"services": {name: {}}})
+    adapter, _ = _dependency_adapter(CommandResult(0, document, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error is not None and "DevDock does not recognize" in declared.error
+    assert name == "" or name not in declared.error
+
+
+def test_a_dependency_naming_an_unrecognizable_service_is_refused(tmp_path: Path) -> None:
+    document = json.dumps({"services": {"web": {"depends_on": {"bad name": {}}}}})
+    adapter, _ = _dependency_adapter(CommandResult(0, document, ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error is not None and "dependency of service web" in declared.error
+    assert "bad name" not in declared.error
+
+
+def test_a_project_with_no_services_key_is_empty_not_an_error(tmp_path: Path) -> None:
+    adapter, _ = _dependency_adapter(CommandResult(0, '{"name": "sample"}', ""))
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.usable and declared.services == ()
+
+
+def test_a_missing_docker_cli_reports_it_without_running_anything(tmp_path: Path) -> None:
+    runner = RecordingRunner([])
+    adapter = ComposeAdapter(runner, locate=lambda _: None)
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error == "Docker CLI is not available."
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (OSError("boom"), "did not complete"),
+        (subprocess.TimeoutExpired(["docker"], 10.0), "did not complete"),
+    ],
+)
+def test_a_listing_that_cannot_run_reports_it_without_the_exception_text(
+    tmp_path: Path, failure: BaseException, expected: str
+) -> None:
+    runner = RecordingRunner([failure])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+
+    declared = adapter.list_dependencies(
+        project_root=tmp_path, compose_file=tmp_path / "compose.yaml"
+    )
+
+    assert declared.error is not None and expected in declared.error
+    assert "boom" not in declared.error
+
+
+@pytest.mark.parametrize(
+    ("reader", "expected"),
+    [
+        ("list_dependencies", "Compose configuration output was nested too deeply to parse."),
+        ("observe_services", "Service status output was nested too deeply to parse."),
+    ],
+)
+def test_json_nested_too_deeply_is_refused_rather_than_raised(
+    tmp_path: Path, reader: str, expected: str
+) -> None:
+    """A RecursionError is not a JSONDecodeError and would escape as a traceback.
+
+    Compose echoes `x-` extension fields verbatim and they accept any
+    structure, so the nesting can come from a project file.
+    """
+
+    deep = '{"services": {"web": ' + "[" * 20000 + "]" * 20000 + "}}"
+    runner = RecordingRunner([CommandResult(0, deep, "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+    arguments: dict[str, object] = {
+        "project_root": tmp_path,
+        "compose_file": tmp_path / "compose.yaml",
+    }
+    if reader == "observe_services":
+        arguments["project_name"] = "devdock-sample-0123456789ab"
+
+    result = getattr(adapter, reader)(**arguments)
+
+    assert result.error == expected

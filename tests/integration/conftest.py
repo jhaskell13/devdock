@@ -46,6 +46,20 @@ def _next_free_port() -> int:
 
 
 @pytest.fixture(scope="session")
+def compose_cli() -> None:
+    """Skip unless the Compose CLI responds.
+
+    Weaker than ``docker_daemon`` on purpose: ``docker compose config`` only
+    parses files, so the tests that check what DevDock extracts from a rendered
+    configuration need no daemon and create nothing. They still live in the
+    gated suite, because they need a real Compose to be worth anything.
+    """
+
+    if not ComposeAdapter().detect_capabilities().compose_available:
+        pytest.skip("Docker Compose CLI is not available.")
+
+
+@pytest.fixture(scope="session")
 def docker_daemon() -> None:
     """Skip the whole suite, with the reason, unless DevDock itself can reach the daemon."""
 

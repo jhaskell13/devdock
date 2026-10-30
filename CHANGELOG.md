@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- Reading a project's real dependencies from Compose. The adapter runs `docker compose config --format json --no-interpolate` and keeps four facts: service names, `depends_on` edges with their condition and Compose's `required` flag, and which services declare or disable a health check. `--no-interpolate` is a safety control: without it Compose expands `${VAR}` from the shell and the project's `.env` and resolves every `env_file` into the output, so the document would carry the project's secrets. Nothing else from it is retained, and a failed listing reports an exit status rather than the runtime's text. No command reads dependencies yet.
 - The merged dependency graph behind the readiness work: Compose-declared and profile-declared dependencies are combined (both are honored, and the stricter condition wins where they are comparable) into sorted startup layers. Undeclared services, contradictory conditions, waits for health on a service with no health check, and dependency cycles are all reported together in one pass, each cyclic group showing a concrete path. No command builds a graph yet.
 - An optional `services` block in `devdock.yaml` for declaring per-service dependencies (`depends_on`, with Compose's conditions plus DevDock's `service_ready`) and readiness probes (`tcp` and `http`). The declarations are validated when the profile loads; no command acts on them yet. They are the input to the readiness and dependency work in milestone 3. Probes may only target loopback, carry a bounded timeout, and there is no probe type that runs a command.
 - A gated Docker integration suite (`pytest -m docker`) that exercises the real runtime with disposable resources and verifies the Compose labels, `compose ps` JSON fields, and failure-taxonomy markers that unit tests can only fake. Deselected by default; skips when no daemon is reachable.
@@ -18,6 +19,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- Parsing JSON from Docker raised an unhandled `RecursionError` on deeply nested input, which is not a decode error and so escaped as a traceback. Compose echoes `x-` extension fields verbatim and they accept any structure, so the nesting can come from a project file. Both the configuration and service-status parsers now refuse it.
 - `devdock init` templated the project name into YAML unquoted, so a directory named `true`, `1.0`, or `a: b` produced a profile that failed validation. The profile is now serialized.
 - `down` reported `DOWN_PARTIAL` after correctly leaving an undeclared running container in place, because that container kept the project network alive. The plan now says the network will stay, and the verification expects it.
 - `UP_TIMED_OUT` referred to a `docker ps` command that was not always printed. It is now included in the evidence.

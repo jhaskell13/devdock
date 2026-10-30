@@ -30,9 +30,16 @@ def graph_of(
     compose: Edges | None = None,
     profile: Edges | None = None,
     *,
-    healthchecked: frozenset[str] | None = None,
+    without_healthcheck: frozenset[str] = frozenset(),
+    optional_edges: frozenset[tuple[str, str]] = frozenset(),
 ) -> DependencyGraph:
-    result = build_graph(declared, compose or {}, profile or {}, healthchecked=healthchecked)
+    result = build_graph(
+        declared,
+        compose or {},
+        profile or {},
+        without_healthcheck=without_healthcheck,
+        optional_edges=optional_edges,
+    )
     assert isinstance(result, DependencyGraph), getattr(result, "explain", lambda: result)()
     return result
 
@@ -42,9 +49,11 @@ def problems_of(
     compose: Edges | None = None,
     profile: Edges | None = None,
     *,
-    healthchecked: frozenset[str] | None = None,
+    without_healthcheck: frozenset[str] = frozenset(),
 ) -> GraphProblems:
-    result = build_graph(declared, compose or {}, profile or {}, healthchecked=healthchecked)
+    result = build_graph(
+        declared, compose or {}, profile or {}, without_healthcheck=without_healthcheck
+    )
     assert isinstance(result, GraphProblems), result
     return result
 
@@ -158,7 +167,7 @@ def test_the_stricter_of_two_compatible_conditions_wins(
         ["web", "db"],
         compose={"web": {"db": compose_condition}},
         profile={"web": {"db": profile_condition}},
-        healthchecked=frozenset({"db"}),
+        without_healthcheck=frozenset(),
     )
 
     assert graph.dependencies[0].condition == expected
@@ -172,7 +181,7 @@ def test_running_and_completed_conditions_on_one_edge_are_a_contradiction(
         ["web", "db"],
         compose={"web": {"db": running_condition}},
         profile={"web": {"db": "service_completed_successfully"}},
-        healthchecked=frozenset({"db"}),
+        without_healthcheck=frozenset(),
     )
 
     assert problems.kinds == ("conflicting_conditions",)
@@ -203,11 +212,11 @@ def test_a_profile_service_with_no_dependencies_is_still_checked_for_existence()
     assert problems_of(["web"], profile={"typo": {}}).kinds == ("undeclared_service",)
 
 
-def test_waiting_for_health_on_a_service_without_a_health_check_is_refused() -> None:
+def test_waiting_for_health_on_a_service_that_disables_its_health_check_is_refused() -> None:
     problems = problems_of(
         ["web", "db"],
         compose={"web": {"db": "service_healthy"}},
-        healthchecked=frozenset(),
+        without_healthcheck=frozenset({"db"}),
     )
 
     assert problems.kinds == ("healthcheck_missing",)
@@ -218,18 +227,65 @@ def test_health_conditions_are_accepted_when_the_service_has_a_health_check() ->
     graph = graph_of(
         ["web", "db"],
         compose={"web": {"db": "service_healthy"}},
-        healthchecked=frozenset({"db"}),
+        without_healthcheck=frozenset(),
     )
 
     assert graph.layers == (("db",), ("web",))
 
 
-def test_health_conditions_are_not_second_guessed_when_health_checks_are_unknown() -> None:
-    """A degraded Compose read must not invent a refusal it cannot justify."""
+def test_a_health_check_merely_absent_from_the_compose_file_is_not_proof() -> None:
+    """The image may define one, which the Compose configuration cannot show.
 
-    graph = graph_of(["web", "db"], compose={"web": {"db": "service_healthy"}}, healthchecked=None)
+    Refusing here would reject projects that work. The wait reports it instead,
+    once a running container shows whether health is reported at all.
+    """
+
+    graph = graph_of(["web", "db"], compose={"web": {"db": "service_healthy"}})
 
     assert graph.dependencies[0].condition == "service_healthy"
+
+
+# --- optional dependencies ----------------------------------------------
+
+
+def test_dependencies_are_required_by_default() -> None:
+    graph = graph_of(["web", "db"], compose={"web": {"db": "service_started"}})
+
+    assert graph.dependencies[0].required is True
+
+
+def test_an_edge_compose_marks_not_required_is_advisory_and_says_so() -> None:
+    graph = graph_of(
+        ["web", "db"],
+        compose={"web": {"db": "service_started"}},
+        optional_edges=frozenset({("web", "db")}),
+    )
+
+    assert graph.dependencies[0].required is False
+    assert graph.dependencies[0].describe().endswith("(service_started, from compose, optional)")
+
+
+def test_an_optional_edge_still_orders_the_start() -> None:
+    graph = graph_of(
+        ["web", "db"],
+        compose={"web": {"db": "service_started"}},
+        optional_edges=frozenset({("web", "db")}),
+    )
+
+    assert graph.layers == (("db",), ("web",))
+
+
+def test_declaring_an_optional_compose_edge_in_the_profile_makes_it_required() -> None:
+    """Writing it in devdock.yaml is an explicit request, so it outranks the marking."""
+
+    graph = graph_of(
+        ["web", "db"],
+        compose={"web": {"db": "service_started"}},
+        profile={"web": {"db": "service_started"}},
+        optional_edges=frozenset({("web", "db")}),
+    )
+
+    assert graph.dependencies[0].required is True
 
 
 def test_a_two_service_cycle_shows_the_path() -> None:
@@ -288,7 +344,7 @@ def test_every_problem_is_reported_in_one_pass() -> None:
             "b": {"a": "service_started"},
         },
         profile={"ghost": {}},
-        healthchecked=frozenset(),
+        without_healthcheck=frozenset({"db"}),
     )
 
     assert set(problems.kinds) == {
@@ -314,7 +370,7 @@ def test_the_plan_lists_layers_and_the_origin_of_each_dependency() -> None:
         ["web", "db"],
         compose={"web": {"db": "service_started"}},
         profile={"web": {"db": "service_healthy"}},
-        healthchecked=frozenset({"db"}),
+        without_healthcheck=frozenset(),
     )
 
     assert graph.explain() == (
@@ -452,7 +508,7 @@ def test_a_cycle_is_still_reported_when_one_of_its_edges_was_also_rejected() -> 
     problems = problems_of(
         ["web", "db"],
         compose={"web": {"db": "service_healthy"}, "db": {"web": "service_started"}},
-        healthchecked=frozenset(),
+        without_healthcheck=frozenset({"db"}),
     )
 
     assert set(problems.kinds) == {"healthcheck_missing", "cycle"}

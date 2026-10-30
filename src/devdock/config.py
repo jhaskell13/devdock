@@ -8,12 +8,15 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-# Compose's own service-name shape, restated here rather than inherited from the
-# Compose file. These names become argv elements when a start is scoped to
-# individual services, so a value beginning with "-" would be read as an option.
-# The length cap keeps a name usable as a DNS label, which is what Compose makes
-# of it on the project network.
-SERVICE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
+# Compose's own service-name shape. A narrower rule here would reject projects
+# that Compose accepts, and a profile that cannot name a service it must
+# configure is worse than a permissive pattern: this rule exists to keep
+# unprintable and structure-breaking names out, not to second-guess Compose.
+# The length cap keeps a name usable as a DNS label, which is what Compose
+# makes of it on the project network. A name legal here can still begin with a
+# character argv would read as an option; that is re-checked where names become
+# command arguments, in the same way the derived project name is.
+SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]{1,63}$")
 
 PROBE_TIMEOUT_SECONDS = 2.0
 MAX_PROBE_TIMEOUT_SECONDS = 60.0

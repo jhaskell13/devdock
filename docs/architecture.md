@@ -31,6 +31,11 @@ Status (status.py)
   ├─ classify_readiness(state, health) is the single source of that mapping
   └─ joins declared order, managed containers, and observations; ignores unproven ones
 
+Dependency listing (adapters/compose.py)
+  ├─ `docker compose config --format json --no-interpolate`
+  ├─ the flag stops ${VAR}, env_file, and .env values being rendered into the output
+  └─ keeps service names, depends_on edges, and health declarations; discards the rest
+
 Dependency graph (graph.py)
   ├─ merges Compose-declared and profile-declared dependencies; both are honored
   ├─ rejects undeclared services, contradictory conditions, unmeetable health waits, cycles
@@ -81,6 +86,18 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 `status.py` separates *running* from *ready*. Compose health is the only readiness source DevDock currently evaluates and is recorded per row as `readiness_source`, so the TCP and HTTP probes the profile can now declare, and dependency blocking, can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
 
 The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
+
+### Reading dependencies without reading secrets
+
+`ComposeAdapter.list_dependencies` is the only place DevDock asks Compose for the whole project document, because `depends_on` is the one ordering fact no narrower query exposes, and because Compose is the only thing that resolves `extends`, `include`, overrides, and profiles correctly. Parsing the YAML in DevDock would be safer with respect to disclosure and produce a confidently wrong graph.
+
+That document is dangerous by default. Verified against a real Compose: `docker compose config --format json` expands `${VAR}` from the shell *and* from the project's `.env`, and resolves every `env_file` into each service's `environment`. `--no-interpolate` stops both — variables stay as written and `env_file` is reported as a path only — so DevDock always passes it. The flag is a safety control, not a performance one, and the gated suite asserts the premise directly: one test confirms Compose still renders those secrets *without* the flag, so if that ever stops being true the test says so rather than the flag quietly becoming pointless.
+
+Four facts survive parsing: service names, `depends_on` edges with their condition and Compose's `required` flag, and which services declare or disable a health check. Everything else is discarded, the document is not retained, and no part of it reaches an error. Errors name the failure and its exit status only. Service names are re-validated against Compose's own shape and, when one fails, the count is reported without the name, because an unexpected name is the value least safe to echo. A dependency condition outside the set Compose accepts today is reported as unsupported rather than downgraded to `service_started`: a newer Compose must not silently cause a service to start too early.
+
+`list_declared_services`, which uses `config --services`, is deliberately kept for `status` and `down`. Those commands need names only, and `--services` discloses only names. The principle is to ask the runtime for the least it can give that answers the question.
+
+A health check absent from the Compose file is not proof that a service has none, because the image may define `HEALTHCHECK`, which the configuration cannot show. Only `healthcheck: disable: true` is proof, so only that refuses a `service_healthy` wait before starting. The rest is reported by the wait, once a running container shows whether health is being reported at all.
 
 `graph.py` turns those declarations plus the Compose file's own into a startup order. It takes plain mappings and returns either a `DependencyGraph` with sorted layers or a `GraphProblems` listing everything wrong at once, in the same `X | Y` return style as `plan_stop`. It holds no CLI codes: problems carry a structural `kind` and the command that builds the graph maps those to the codes a user sees, so the graph rules stay testable without the command vocabulary. Tarjan's algorithm is written iteratively because a deeply chained Compose file must produce a refusal rather than a `RecursionError`. No command builds a graph yet.
 

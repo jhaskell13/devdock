@@ -179,13 +179,13 @@ def test_rejects_a_service_that_depends_on_itself() -> None:
         _with_services({"web": {"depends_on": {"web": "service_started"}}})
 
 
-@pytest.mark.parametrize("name", ["-web", "", "web service", "web\nservice", "a" * 64, "wéb"])
+@pytest.mark.parametrize("name", ["", "web service", "web\nservice", "a" * 64, "wéb", "a/b"])
 def test_rejects_unsafe_service_names(name: str) -> None:
     with pytest.raises(ValidationError, match="valid Compose service name"):
         _with_services({name: {}})
 
 
-@pytest.mark.parametrize("name", ["-db", "db cache", "db\tcache"])
+@pytest.mark.parametrize("name", ["db cache", "db\tcache", "db\x1b[2J", "a" * 64])
 def test_rejects_unsafe_dependency_names(name: str) -> None:
     with pytest.raises(ValidationError, match="valid Compose service name"):
         _with_services({"web": {"depends_on": {name: "service_started"}}})
@@ -271,3 +271,15 @@ def test_declared_statuses_replace_the_default_range() -> None:
     assert isinstance(probe, HttpReadiness)
 
     assert [probe.accepts(status) for status in (204, 418, 200)] == [True, True, False]
+
+
+@pytest.mark.parametrize("name", ["_internal", "-leading-dash", "web.1", "a"])
+def test_accepts_every_service_name_compose_itself_accepts(name: str) -> None:
+    """A narrower rule would reject projects that Compose runs.
+
+    A leading dash is legal to Compose, so it is legal here; argv safety is
+    enforced where a name becomes a command argument, not by refusing the
+    profile.
+    """
+
+    assert name in _with_services({name: {}}).services

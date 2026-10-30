@@ -60,7 +60,7 @@ services:
 
 **This version validates these declarations and does nothing else with them.** Startup ordering and readiness waiting arrive with `devdock up --wait`; see [`ROADMAP.md`](../ROADMAP.md), milestone 3. Declaring them now does not change what `up`, `status`, or `down` do.
 
-Service names, both as keys and as dependency targets, must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*` and be at most 63 characters. That is Compose's own shape, restated so that a name can never be read as a command-line option when a start is scoped to specific services. A service name that exists here but not in the Compose file is not an error at load time, because validating it requires running Compose; that check belongs to the command that uses the graph.
+Service names, both as keys and as dependency targets, must match `[a-zA-Z0-9._-]+` and be at most 63 characters. That is Compose's own shape; a narrower rule would reject projects Compose runs. The rule keeps unprintable and structure-breaking names out, not names Compose considers ordinary. A service name that exists here but not in the Compose file is not an error at load time, because validating it requires running Compose; that check belongs to the command that uses the graph.
 
 `depends_on` accepts either Compose's mapping form or its short list form, where `[db, cache]` means `service_started` for each. A service may not depend on itself. Longer cycles are not detected here, because they can run through the Compose file's own dependencies and so need the merged graph.
 
@@ -84,10 +84,16 @@ The merged graph must produce a startup order. These are reported together in on
 | A dependency naming a service the Compose file does not declare | The dependency and the list of declared services |
 | A `services` key naming a service the Compose file does not declare | The name, with the suggestion to correct it or add the service |
 | Two conditions on one edge that cannot both hold | Both conditions and where each came from |
-| `service_healthy` on a service with no Compose health check | That the condition can never be met, with three ways to fix it |
+| `service_healthy` on a service whose Compose file sets `healthcheck: disable: true` | That the condition can never be met, with three ways to fix it |
 | A dependency cycle | One concrete path through each cyclic group, as `a depends on b depends on a`, plus every service involved |
 
 A cycle is reported once per cyclic group with a single representative path, not once per distinct cycle, because enumerating every cycle can be exponential. Breaking the reported path and running again reveals whatever remains. Rejecting a condition does not hide a cycle the same edge takes part in.
+
+A `service_healthy` wait is only refused when the Compose file **disables** the health check. A service that simply does not declare one may still inherit a `HEALTHCHECK` from its image, which the Compose configuration cannot show, so refusing there would reject projects that work. That case is reported by the wait instead, once a running container shows whether health is being reported at all.
+
+Compose's `required: false` on a dependency is honored: the edge still orders the start, but a dependency that never becomes available does not fail the service waiting on it. Declaring the same edge in `devdock.yaml` makes it required again, because writing it there is an explicit request.
+
+DevDock reads dependencies with `docker compose config --format json --no-interpolate`. The flag matters: without it, Compose expands `${VAR}` from the shell and the project's `.env` and resolves every `env_file` into the rendered output, so the document would carry the project's secrets. With it, variables stay as written and `env_file` appears as a path. From that document DevDock keeps only service names, `depends_on` edges, and which services declare or disable a health check; the rest is discarded and no part of it appears in any message. A listing that fails reports the exit status, never the runtime's text. A dependency condition newer than the ones listed above is reported as unsupported rather than treated as `service_started`.
 
 The startup order itself is a sequence of layers. Every service in a layer may start once every earlier layer has met its conditions, services within a layer are independent of one another, and both the layers and the services inside them are sorted, so the plan a user sees does not move between runs.
 

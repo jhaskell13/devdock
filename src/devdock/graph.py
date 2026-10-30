@@ -70,16 +70,28 @@ def _merge_conditions(
 
 @dataclass(frozen=True)
 class Dependency:
-    """One edge: ``service`` may not start until ``depends_on`` meets ``condition``."""
+    """One edge: ``service`` may not start until ``depends_on`` meets ``condition``.
+
+    ``required`` is Compose's own flag. When it is false, Compose warns instead
+    of failing if the dependency never becomes available, so the wait treats
+    the edge as advisory: it still orders the start, but a dependency that
+    never arrives does not fail the service waiting on it. An edge the profile
+    declares is always required, because declaring it is an explicit request.
+    """
 
     service: str
     depends_on: str
     condition: DependencyCondition
     sources: tuple[DependencySource, ...]
+    required: bool = True
 
     def describe(self) -> str:
         origin = " and ".join(self.sources)
-        return f"{self.service} depends on {self.depends_on} ({self.condition}, from {origin})"
+        optional = "" if self.required else ", optional"
+        return (
+            f"{self.service} depends on {self.depends_on} "
+            f"({self.condition}, from {origin}{optional})"
+        )
 
 
 @dataclass(frozen=True)
@@ -161,7 +173,8 @@ def build_graph(
     compose_dependencies: Mapping[str, Mapping[str, DependencyCondition]],
     profile_dependencies: Mapping[str, Mapping[str, DependencyCondition]],
     *,
-    healthchecked: frozenset[str] | None = None,
+    without_healthcheck: frozenset[str] = frozenset(),
+    optional_edges: frozenset[tuple[str, str]] = frozenset(),
 ) -> DependencyGraph | GraphProblems:
     """Merge the declared dependencies into a startup order, or explain why not.
 
@@ -170,10 +183,16 @@ def build_graph(
     profile names, including those that declare no dependency, so that a profile
     naming a service the Compose file does not have is reported.
 
-    ``healthchecked`` lists the services that have a Compose health check. Pass
-    ``None`` when that is not known -- for example when the Compose
-    configuration could not be read -- and the check that ``service_healthy`` is
-    satisfiable is skipped rather than guessed at.
+    ``without_healthcheck`` lists services *proven* to have no usable health
+    check, which is only true when the Compose file disables one explicitly. A
+    service that simply does not declare one may still inherit a ``HEALTHCHECK``
+    from its image, and the Compose configuration cannot show that, so absence
+    there is not proof and does not refuse a ``service_healthy`` wait. The wait
+    reports it instead, once the running container shows whether health is
+    being reported at all.
+
+    ``optional_edges`` holds the ``(service, depends_on)`` pairs Compose marked
+    ``required: false``.
     """
 
     nodes = tuple(sorted(set(declared)))
@@ -191,7 +210,7 @@ def build_graph(
         )
 
     merged, merge_problems = _merge_edges(
-        known, compose_dependencies, profile_dependencies, healthchecked
+        known, compose_dependencies, profile_dependencies, without_healthcheck, optional_edges
     )
     problems.extend(merge_problems)
     problems.extend(_cycle_problems(nodes, merged))
@@ -204,7 +223,8 @@ def _merge_edges(
     known: set[str],
     compose_dependencies: Mapping[str, Mapping[str, DependencyCondition]],
     profile_dependencies: Mapping[str, Mapping[str, DependencyCondition]],
-    healthchecked: frozenset[str] | None,
+    without_healthcheck: frozenset[str],
+    optional_edges: frozenset[tuple[str, str]],
 ) -> tuple[tuple[Dependency, ...], list[GraphProblem]]:
     """Combine both sources edge by edge and validate each merged edge."""
 
@@ -257,22 +277,18 @@ def _merge_edges(
                 )
             )
             continue
-        if (
-            condition == "service_healthy"
-            and healthchecked is not None
-            and target not in healthchecked
-        ):
+        if condition == "service_healthy" and target in without_healthcheck:
             problems.append(
                 GraphProblem(
                     "healthcheck_missing",
-                    f"{service} waits for {target} to be healthy, but {target} has no Compose "
+                    f"{service} waits for {target} to be healthy, but {target} disables its "
                     "health check.",
                     (
                         "That condition can never be met, so the start would wait until it "
                         "timed out.",
-                        f"Add a healthcheck to {target} in the Compose file, or depend on "
-                        "service_started, or declare a readiness probe for it in devdock.yaml "
-                        "and depend on service_ready.",
+                        f"Remove 'healthcheck: disable: true' from {target} in the Compose "
+                        "file, or depend on service_started, or declare a readiness probe for "
+                        "it in devdock.yaml and depend on service_ready.",
                     ),
                 )
             )
@@ -281,7 +297,10 @@ def _merge_edges(
         # the missing health check should not then discover a cycle that was
         # visible all along. Only an edge whose target does not exist is
         # dropped, because there is no node to traverse to.
-        dependencies.append(Dependency(service, target, condition, tuple(sources)))
+        # An edge the profile declares is always required: declaring it is an
+        # explicit request, which outranks Compose's "warn only" marking.
+        required = (service, target) not in optional_edges or "profile" in sources
+        dependencies.append(Dependency(service, target, condition, tuple(sources), required))
     return tuple(dependencies), problems
 
 

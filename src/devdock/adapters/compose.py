@@ -17,6 +17,8 @@ from devdock.adapters.base import (
     ConfigValidation,
     ContainerRecord,
     DaemonState,
+    DeclaredDependencies,
+    DeclaredDependency,
     DeclaredServices,
     NetworkRecord,
     OperationOutcome,
@@ -383,6 +385,52 @@ class ComposeAdapter:
         names = tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
         return DeclaredServices(names=names)
 
+    def list_dependencies(self, *, project_root: Path, compose_file: Path) -> DeclaredDependencies:
+        """Read startup-ordering facts from the rendered Compose configuration.
+
+        This is the only DevDock command that asks Compose for the whole
+        project document, because ``depends_on`` is the one fact no narrower
+        query exposes, and because Compose is the only thing that can resolve
+        ``extends``, ``include``, overrides, and profiles correctly. Parsing
+        the YAML here instead would produce a confidently wrong graph.
+
+        ``--no-interpolate`` is not an optimization. Without it, Compose
+        renders ``${VAR}`` substitutions *and* the contents of every
+        ``env_file`` into the ``environment`` of each service, so the document
+        would carry the project's secrets. With it, variables stay as written
+        and ``env_file`` is reported as a path only. Both were verified against
+        a real Compose. What survives parsing is only the four fields in
+        ``DeclaredDependencies``; the document is not retained, and no part of
+        it appears in any error this method returns.
+        """
+
+        executable = self._locate("docker")
+        if executable is None:
+            return DeclaredDependencies(error="Docker CLI is not available.")
+        args = [
+            executable,
+            "compose",
+            "--project-directory",
+            str(project_root),
+            "--file",
+            str(compose_file),
+            "config",
+            "--format",
+            "json",
+            "--no-interpolate",
+        ]
+        try:
+            result = self._runner(
+                args, cwd=project_root, timeout=CONFIG_TIMEOUT, env=self._environment()
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return DeclaredDependencies(error="Compose dependency listing did not complete.")
+        if result.returncode:
+            return DeclaredDependencies(
+                error=f"Compose dependency listing failed with exit code {result.returncode}."
+            )
+        return _parse_dependencies(result.stdout)
+
     def observe_services(
         self,
         *,
@@ -410,6 +458,171 @@ class ComposeAdapter:
         return _parse_service_observations(result.stdout)
 
 
+# The rendered configuration is read into memory before anything is extracted
+# from it, so the size it may reach is bounded here rather than trusted. A
+# project large enough to exceed this is better served by a clear refusal than
+# by an unbounded parse of a document DevDock wants four fields from.
+MAX_CONFIG_CHARACTERS = 4_000_000
+
+# Compose's own service-name shape. Its schema already enforces this, so a name
+# that fails here means the output did not come from a Compose that DevDock
+# understands. Names are not quoted when rejected: an unexpected name is
+# exactly the value least safe to echo. A name legal here can still begin with
+# a character that argv would read as an option, which is re-checked where
+# names become command arguments rather than assumed here.
+COMPOSE_SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]{1,63}$")
+
+# What Compose's schema accepts today. A condition outside this set means a
+# newer Compose, not a malformed file, and DevDock must not guess at ordering
+# it does not understand.
+COMPOSE_CONDITIONS = frozenset(
+    {"service_started", "service_healthy", "service_completed_successfully"}
+)
+# A condition is runtime-supplied text. It is echoed only when it looks like a
+# Compose condition identifier, so an unexpected value is described rather than
+# repeated.
+_QUOTABLE_CONDITION = re.compile(r"^[a-z_]{1,40}$")
+
+
+def _parse_dependencies(text: str) -> DeclaredDependencies:
+    """Keep the ordering facts from a rendered configuration and discard the rest.
+
+    Nothing read here is returned except service names, dependency edges, and
+    which services declare or disable a health check. Errors name the failure,
+    never the content that caused it.
+    """
+
+    if len(text) > MAX_CONFIG_CHARACTERS:
+        return DeclaredDependencies(
+            error="Compose configuration was too large for DevDock to parse safely."
+        )
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        return DeclaredDependencies(error="Compose configuration output was not valid JSON.")
+    except RecursionError:
+        # Not a JSONDecodeError, so it would otherwise escape as a traceback.
+        # Compose echoes `x-` extension fields verbatim and they accept any
+        # structure, so nesting deep enough to exhaust the parser's stack can
+        # come from a project file.
+        return DeclaredDependencies(
+            error="Compose configuration output was nested too deeply to parse."
+        )
+    if not isinstance(document, dict):
+        return DeclaredDependencies(error="Compose configuration output was not an object.")
+    raw_services = document.get("services")
+    if raw_services is None:
+        return DeclaredDependencies()
+    if not isinstance(raw_services, dict):
+        return DeclaredDependencies(
+            error="Compose configuration output did not describe services as an object."
+        )
+
+    names: list[str] = []
+    rejected = 0
+    for name in raw_services:
+        if isinstance(name, str) and COMPOSE_SERVICE_NAME.fullmatch(name):
+            names.append(name)
+        else:
+            rejected += 1
+    if rejected:
+        return DeclaredDependencies(
+            error=f"Compose configuration named {rejected} service(s) in a form DevDock does "
+            "not recognize."
+        )
+
+    dependencies: list[DeclaredDependency] = []
+    declared_health: set[str] = set()
+    disabled_health: set[str] = set()
+    unsupported: set[str] = set()
+    for name in names:
+        definition = raw_services[name]
+        if not isinstance(definition, dict):
+            return DeclaredDependencies(
+                error="Compose configuration described a service in a form DevDock does not "
+                "recognize."
+            )
+        health = definition.get("healthcheck")
+        if isinstance(health, dict):
+            if health.get("disable") is True:
+                disabled_health.add(name)
+            else:
+                declared_health.add(name)
+        edges, problems = _parse_depends_on(name, definition.get("depends_on"))
+        if problems is not None:
+            return DeclaredDependencies(error=problems)
+        dependencies.extend(edges)
+        unsupported.update(
+            _unsupported_condition(edge.condition)
+            for edge in edges
+            if edge.condition not in COMPOSE_CONDITIONS
+        )
+
+    if unsupported:
+        # Nothing else comes back. The edges are unusable regardless, and one
+        # of them holds the unrecognized condition verbatim -- the only value
+        # in this result that did not come from a vocabulary DevDock fixed in
+        # advance. Dropping them keeps it away from a caller that might render
+        # it.
+        return DeclaredDependencies(unsupported=tuple(sorted(unsupported)))
+
+    return DeclaredDependencies(
+        services=tuple(sorted(names)),
+        dependencies=tuple(sorted(dependencies, key=lambda edge: (edge.service, edge.depends_on))),
+        healthcheck_declared=frozenset(declared_health),
+        healthcheck_disabled=frozenset(disabled_health),
+    )
+
+
+def _unsupported_condition(condition: str) -> str:
+    named = condition if _QUOTABLE_CONDITION.fullmatch(condition) else "an unprintable value"
+    return (
+        f"Compose reported the dependency condition {named}, which this version of DevDock "
+        "cannot order against."
+    )
+
+
+def _parse_depends_on(service: str, raw: object) -> tuple[list[DeclaredDependency], str | None]:
+    """Read one service's dependencies from either Compose form.
+
+    Current Compose normalizes the short list form into the mapping form, but
+    the list form is still accepted here so an older Compose does not silently
+    produce a graph with no edges.
+    """
+
+    if raw is None:
+        return [], None
+    edges: list[DeclaredDependency] = []
+    if isinstance(raw, list):
+        for target in raw:
+            if not isinstance(target, str) or not COMPOSE_SERVICE_NAME.fullmatch(target):
+                return [], _unrecognized_dependency(service)
+            edges.append(DeclaredDependency(service, target, "service_started"))
+        return edges, None
+    if not isinstance(raw, dict):
+        return [], _unrecognized_dependency(service)
+    for target, settings in raw.items():
+        if not isinstance(target, str) or not COMPOSE_SERVICE_NAME.fullmatch(target):
+            return [], _unrecognized_dependency(service)
+        condition = "service_started"
+        required = True
+        if isinstance(settings, dict):
+            raw_condition = settings.get("condition")
+            if isinstance(raw_condition, str) and raw_condition:
+                condition = raw_condition
+            required = settings.get("required") is not False
+        elif settings is not None:
+            return [], _unrecognized_dependency(service)
+        edges.append(DeclaredDependency(service, target, condition, required))
+    return edges, None
+
+
+def _unrecognized_dependency(service: str) -> str:
+    return (
+        f"Compose described a dependency of service {service} in a form DevDock does not recognize."
+    )
+
+
 def _parse_service_observations(text: str) -> ServiceObservations:
     """Accept a JSON array or newline-delimited objects; both exist across Compose versions."""
 
@@ -425,6 +638,8 @@ def _parse_service_observations(text: str) -> ServiceObservations:
             raw_items = [json.loads(line) for line in stripped.splitlines() if line.strip()]
     except json.JSONDecodeError:
         return ServiceObservations(error="Service status output was not valid JSON.")
+    except RecursionError:  # same hazard as the configuration parser; not a decode error
+        return ServiceObservations(error="Service status output was nested too deeply to parse.")
 
     items: list[ServiceObservation] = []
     skipped = 0

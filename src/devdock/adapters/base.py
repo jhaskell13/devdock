@@ -202,6 +202,44 @@ class DeclaredServices:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class DeclaredDependency:
+    """One ``depends_on`` edge as the Compose configuration states it."""
+
+    service: str
+    depends_on: str
+    condition: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class DeclaredDependencies:
+    """The startup-ordering facts extracted from a rendered Compose configuration.
+
+    This is everything DevDock keeps from a document that also describes
+    images, commands, volumes, and environment. The four fields here are the
+    only ones read; the rest is discarded at parse time and never reaches a
+    finding, a log line, or an error.
+
+    ``error`` means the configuration could not be read at all, and the caller
+    may continue without ordering. ``unsupported`` means it was read but
+    contains something DevDock cannot model, which is not safe to continue
+    from: ordering derived from a half-understood graph could start a service
+    too early.
+    """
+
+    services: tuple[str, ...] = ()
+    dependencies: tuple[DeclaredDependency, ...] = ()
+    healthcheck_declared: frozenset[str] = frozenset()
+    healthcheck_disabled: frozenset[str] = frozenset()
+    error: str | None = None
+    unsupported: tuple[str, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return self.error is None and not self.unsupported
+
+
 class RuntimeAdapter(Protocol):
     """Inspect-side operations every runtime adapter provides."""
 
@@ -241,6 +279,10 @@ class RuntimeAdapter(Protocol):
 
     def list_declared_services(self, *, project_root: Path, compose_file: Path) -> DeclaredServices:
         """Return service names from the configuration without rendering its values."""
+        ...
+
+    def list_dependencies(self, *, project_root: Path, compose_file: Path) -> DeclaredDependencies:
+        """Return startup-ordering facts only: names, ``depends_on``, health declarations."""
         ...
 
     def observe_services(
