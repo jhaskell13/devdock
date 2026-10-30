@@ -112,8 +112,9 @@ The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml
 | `required_files` | No | Project-relative files that must exist. Absolute paths, backslashes, and lexical traversal are rejected. |
 | `required_dirs` | No | Project-relative directories that must exist. Symlinks resolving outside the project fail the check. |
 | `ports` | No | TCP ports from 1 through 65535 to probe on `127.0.0.1`. Availability is a point-in-time observation and may change immediately. |
+| `services` | No | Per-service `depends_on` conditions and `readiness` probes. Validated when the profile loads; **no command acts on them yet**. They will drive `devdock up --wait`; see [`ROADMAP.md`](ROADMAP.md). |
 
-Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands.
+Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands. Readiness probes are limited to TCP and HTTP against loopback; there is no probe type that runs a command.
 
 To set an environment variable for a check:
 

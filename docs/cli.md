@@ -34,8 +34,56 @@ The profile is UTF-8 YAML loaded with safe parsing. The root must be an object w
 | `required_files` | Optional list of project-relative file paths. Absolute paths, drive prefixes, backslashes, control characters, and lexical `..` traversal are rejected. Resolved symlinks must remain inside the project. |
 | `required_dirs` | Optional list of project-relative directory paths with the same containment rules as `required_files`. |
 | `ports` | Optional distinct integer TCP ports from `1` through `65535`. Each is probed by binding `127.0.0.1`; this is a momentary check, not a reservation. |
+| `services` | Optional mapping of Compose service name to that service's `depends_on` and `readiness` declarations. Validated on load; see [Service dependencies and readiness probes](#service-dependencies-and-readiness-probes). |
 
 Unknown fields are errors. The schema does not load `.env`, expand variables, execute commands, or store state. Python requirements currently accept a minimum such as `>=3.12` or `>=3.12.1`; the check compares major, minor, and patch versions with the interpreter running DevDock. Docker accepts `compose` and separately checks the CLI/plugin, daemon reachability, and Compose config parser. Reachability is probed with `docker version --format '{{.Server.Version}}'`, which fails when the server does not answer; `docker info` is not used because it exits successfully even when the daemon socket is unreachable. Other runtime names or requirement forms produce a failed finding.
+
+### Service dependencies and readiness probes
+
+The `services` block describes what DevDock should know about a Compose service beyond what the Compose file says. Both of its fields are optional and additive.
+
+```yaml
+services:
+  web:
+    depends_on:
+      db: service_healthy
+      migrate: service_completed_successfully
+    readiness:
+      - type: http
+        port: 8080
+        path: /healthz
+  db:
+    readiness:
+      - type: tcp
+        port: 5432
+```
+
+**This version validates these declarations and does nothing else with them.** Startup ordering and readiness waiting arrive with `devdock up --wait`; see [`ROADMAP.md`](../ROADMAP.md), milestone 3. Declaring them now does not change what `up`, `status`, or `down` do.
+
+Service names, both as keys and as dependency targets, must match `[a-zA-Z0-9][a-zA-Z0-9_.-]*` and be at most 63 characters. That is Compose's own shape, restated so that a name can never be read as a command-line option when a start is scoped to specific services. A service name that exists here but not in the Compose file is not an error at load time, because validating it requires running Compose; that check belongs to the command that uses the graph.
+
+`depends_on` accepts either Compose's mapping form or its short list form, where `[db, cache]` means `service_started` for each. A service may not depend on itself. Longer cycles are not detected here, because they can run through the Compose file's own dependencies and so need the merged graph.
+
+| Condition | Satisfied when |
+| --- | --- |
+| `service_started` | The dependency is running. |
+| `service_healthy` | The dependency has a Compose health check and it reports healthy. |
+| `service_completed_successfully` | The dependency exited with code `0`. |
+| `service_ready` | The dependency satisfies *every* readiness source DevDock knows for it, including the probes below. This condition is DevDock's own; Compose has no equivalent. |
+
+`readiness` lists the probes that must pass before DevDock calls a service ready. Every declared probe must pass, and a Compose health check, when the container has one, is checked as well. A service with no probes and no health check can only be reported as running; DevDock does not infer readiness from uptime.
+
+| Probe field | Applies to | Contract |
+| --- | --- | --- |
+| `type` | both | Required, `tcp` or `http`. No other probe type exists; DevDock does not run commands supplied by a profile. |
+| `port` | both | Required strict integer from `1` through `65535`. This is the port **published on the host**, not the port inside the container, because DevDock probes from the host. |
+| `host` | both | Optional, default `127.0.0.1`. Must be loopback: a loopback IP address or `localhost`. Any other value is rejected when the profile loads, so a profile arriving with a cloned repository cannot direct DevDock at another machine. `localhost` is resolved by the host's own configuration. |
+| `timeout` | both | Optional seconds for one probe attempt, greater than `0` and at most `60`. Default `2`. |
+| `path` | `http` | Optional request target, default `/`. Must begin with `/`, be at most 2000 characters, and contain no whitespace or control characters, so a declared path cannot append a line to the request. |
+| `method` | `http` | Optional, `GET` or `HEAD`. Default `GET`. |
+| `expect_status` | `http` | Optional list of accepted status codes from `100` through `599`. Omit it to accept `200` through `399`. An empty list is rejected as ambiguous. |
+
+HTTP probes use plain `http://`. A TLS endpoint should use a `tcp` probe for now; DevDock will not add an option to skip certificate verification.
 
 ## Output and exit behavior
 

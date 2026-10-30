@@ -3,6 +3,7 @@
 import ast
 import re
 from pathlib import Path
+from typing import get_args
 
 from devdock.failures import _SUFFIX
 
@@ -100,3 +101,39 @@ def test_the_code_table_does_not_list_codes_that_no_longer_exist() -> None:
     )
 
     assert not stale, f"codes documented but never emitted: {stale}"
+
+
+def test_the_example_profile_still_validates() -> None:
+    """The README calls this the complete starter example; it must load."""
+
+    from devdock.config import load_profile
+
+    profile = load_profile(ROOT / "devdock.example.yaml")
+
+    assert profile.schema_version == 1
+
+
+def test_every_dependency_condition_is_documented() -> None:
+    from devdock.config import DependencyCondition
+
+    undocumented = sorted(
+        condition for condition in get_args(DependencyCondition) if f"`{condition}`" not in CLI_DOC
+    )
+
+    assert not undocumented, (
+        f"conditions accepted by the profile but absent from docs: {undocumented}"
+    )
+
+
+def test_every_readiness_probe_type_is_documented() -> None:
+    from devdock.config import HttpReadiness, TcpReadiness
+
+    types = [
+        get_args(model.model_fields["type"].annotation)[0]
+        for model in (TcpReadiness, HttpReadiness)
+    ]
+    undocumented = sorted(name for name in types if f"`{name}`" not in CLI_DOC)
+
+    assert not undocumented, (
+        f"probe types accepted by the profile but absent from docs: {undocumented}"
+    )

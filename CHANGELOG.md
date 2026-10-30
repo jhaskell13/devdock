@@ -6,6 +6,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Added
 
+- An optional `services` block in `devdock.yaml` for declaring per-service dependencies (`depends_on`, with Compose's conditions plus DevDock's `service_ready`) and readiness probes (`tcp` and `http`). The declarations are validated when the profile loads; no command acts on them yet. They are the input to the readiness and dependency work in milestone 3. Probes may only target loopback, carry a bounded timeout, and there is no probe type that runs a command.
 - A gated Docker integration suite (`pytest -m docker`) that exercises the real runtime with disposable resources and verifies the Compose labels, `compose ps` JSON fields, and failure-taxonomy markers that unit tests can only fake. Deselected by default; skips when no daemon is reachable.
 - `examples/demo`, a disposable sample project, and `scripts/demo.py`, a scripted walkthrough of the full lifecycle including the ownership refusal and volume preservation.
 - `python -m devdock` as an alternative to the installed script.

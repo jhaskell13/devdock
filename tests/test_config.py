@@ -4,7 +4,19 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from devdock.config import ProfileError, ProjectProfile, load_profile
+from devdock.config import (
+    HttpReadiness,
+    ProfileError,
+    ProjectProfile,
+    TcpReadiness,
+    load_profile,
+)
+
+
+def _with_services(services: object) -> ProjectProfile:
+    return ProjectProfile.model_validate(
+        {"schema_version": 1, "project": "sample", "services": services}
+    )
 
 
 def test_loads_valid_profile(tmp_path: Path) -> None:
@@ -97,3 +109,165 @@ def test_paths_with_control_characters_are_rejected(
 
     with pytest.raises(ProfileError, match="control characters|project-contained"):
         load_profile(profile_path)
+
+
+def test_services_default_to_empty_so_existing_profiles_keep_working() -> None:
+    profile = ProjectProfile.model_validate({"schema_version": 1, "project": "sample"})
+
+    assert profile.services == {}
+
+
+def test_reads_dependencies_and_readiness_probes(tmp_path: Path) -> None:
+    profile_path = tmp_path / "devdock.yaml"
+    profile_path.write_text(
+        "schema_version: 1\n"
+        "project: sample\n"
+        "services:\n"
+        "  web:\n"
+        "    depends_on:\n"
+        "      db: service_healthy\n"
+        "      migrate: service_completed_successfully\n"
+        "    readiness:\n"
+        "      - type: http\n"
+        "        port: 8080\n"
+        "        path: /healthz\n"
+        "  db:\n"
+        "    readiness:\n"
+        "      - type: tcp\n"
+        "        port: 5432\n"
+        "        timeout: 1.5\n",
+        encoding="utf-8",
+    )
+
+    profile = load_profile(profile_path)
+
+    web = profile.services["web"]
+    assert web.depends_on == {
+        "db": "service_healthy",
+        "migrate": "service_completed_successfully",
+    }
+    probe = web.readiness[0]
+    assert isinstance(probe, HttpReadiness)
+    assert (probe.host, probe.port, probe.path) == ("127.0.0.1", 8080, "/healthz")
+    assert probe.method == "GET"
+    database = profile.services["db"].readiness[0]
+    assert isinstance(database, TcpReadiness)
+    assert (database.port, database.timeout) == (5432, 1.5)
+
+
+def test_compose_short_form_dependencies_mean_service_started() -> None:
+    profile = _with_services({"web": {"depends_on": ["db", "cache"]}})
+
+    assert profile.services["web"].depends_on == {
+        "db": "service_started",
+        "cache": "service_started",
+    }
+
+
+def test_rejects_a_service_named_twice_in_the_short_form() -> None:
+    with pytest.raises(ValidationError, match="more than once"):
+        _with_services({"web": {"depends_on": ["db", "db"]}})
+
+
+def test_rejects_an_unknown_dependency_condition() -> None:
+    with pytest.raises(ValidationError, match="depends_on"):
+        _with_services({"web": {"depends_on": {"db": "service_warm"}}})
+
+
+def test_rejects_a_service_that_depends_on_itself() -> None:
+    with pytest.raises(ValidationError, match="depend on itself"):
+        _with_services({"web": {"depends_on": {"web": "service_started"}}})
+
+
+@pytest.mark.parametrize("name", ["-web", "", "web service", "web\nservice", "a" * 64, "wéb"])
+def test_rejects_unsafe_service_names(name: str) -> None:
+    with pytest.raises(ValidationError, match="valid Compose service name"):
+        _with_services({name: {}})
+
+
+@pytest.mark.parametrize("name", ["-db", "db cache", "db\tcache"])
+def test_rejects_unsafe_dependency_names(name: str) -> None:
+    with pytest.raises(ValidationError, match="valid Compose service name"):
+        _with_services({"web": {"depends_on": {name: "service_started"}}})
+
+
+def test_rejects_unknown_fields_inside_a_service() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _with_services({"web": {"wait_for": ["db"]}})
+
+
+def test_rejects_unknown_fields_inside_a_probe() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        _with_services({"web": {"readiness": [{"type": "tcp", "port": 80, "retries": 3}]}})
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["example.com", "10.0.0.1", "0.0.0.0", "169.254.169.254", "127.0.0.1.example.com", ""],
+)
+def test_readiness_probes_may_only_target_loopback(host: str) -> None:
+    with pytest.raises(ValidationError, match="loopback"):
+        _with_services({"web": {"readiness": [{"type": "tcp", "port": 80, "host": host}]}})
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1", "localhost", "LOCALHOST"])
+def test_loopback_hosts_are_accepted(host: str) -> None:
+    profile = _with_services({"web": {"readiness": [{"type": "tcp", "port": 80, "host": host}]}})
+
+    assert profile.services["web"].readiness[0].host == host
+
+
+@pytest.mark.parametrize("probe_type", ["tcp", "http"])
+@pytest.mark.parametrize("port", [0, 65536, True, "8080"])
+def test_rejects_invalid_probe_ports(probe_type: str, port: object) -> None:
+    with pytest.raises(ValidationError):
+        _with_services({"web": {"readiness": [{"type": probe_type, "port": port}]}})
+
+
+@pytest.mark.parametrize("probe_type", [None, "", "exec", "grpc"])
+def test_rejects_unsupported_probe_types(probe_type: object) -> None:
+    with pytest.raises(ValidationError):
+        _with_services({"web": {"readiness": [{"type": probe_type, "port": 80}]}})
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 61])
+def test_probe_timeouts_must_be_positive_and_bounded(timeout: float) -> None:
+    with pytest.raises(ValidationError, match="timeout"):
+        _with_services({"web": {"readiness": [{"type": "tcp", "port": 80, "timeout": timeout}]}})
+
+
+@pytest.mark.parametrize(
+    "path", ["healthz", "/health z", "/health\r\nX-Injected: 1", "/health\x00", "/" + "a" * 2000]
+)
+def test_rejects_request_paths_that_could_split_the_request_line(path: str) -> None:
+    with pytest.raises(ValidationError, match="path"):
+        _with_services({"web": {"readiness": [{"type": "http", "port": 80, "path": path}]}})
+
+
+def test_rejects_an_empty_expected_status_list() -> None:
+    with pytest.raises(ValidationError, match="at least one status code"):
+        _with_services({"web": {"readiness": [{"type": "http", "port": 80, "expect_status": []}]}})
+
+
+def test_expected_statuses_default_to_the_success_and_redirect_range() -> None:
+    profile = _with_services({"web": {"readiness": [{"type": "http", "port": 80}]}})
+    probe = profile.services["web"].readiness[0]
+    assert isinstance(probe, HttpReadiness)
+
+    assert [probe.accepts(status) for status in (199, 200, 399, 400, 503)] == [
+        False,
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
+def test_declared_statuses_replace_the_default_range() -> None:
+    profile = _with_services(
+        {"web": {"readiness": [{"type": "http", "port": 80, "expect_status": [204, 418]}]}}
+    )
+    probe = profile.services["web"].readiness[0]
+    assert isinstance(probe, HttpReadiness)
+
+    assert [probe.accepts(status) for status in (204, 418, 200)] == [True, True, False]

@@ -66,12 +66,15 @@ The root YAML object has these fields:
 - `required_env`: optional list of environment variable names. DevDock checks whether each name is set in its process environment and never prints values.
 - `required_files` and `required_dirs`: optional project-relative filesystem paths. Lexical traversal and resolved symlinks outside the project are rejected by checks.
 - `ports`: optional distinct TCP ports to probe on loopback; results are momentary observations.
+- `services`: optional per-service `depends_on` conditions and `readiness` probes. Validated on load and not yet consumed by any command. Service names are re-validated against Compose's own shape so a name can never be read as a command-line option. Probes are `tcp` or `http` only, bounded by an explicit timeout, and restricted to loopback at load time and again before connecting; a profile is data and must not be able to direct DevDock at another host or run a command.
 
 Unknown fields are rejected so typos do not silently weaken a check. Profile values contain configuration only; credentials remain in the user's local environment.
 
 ## Readiness foundation
 
-`status.py` separates *running* from *ready*. Compose health is the only readiness source today and is recorded per row as `readiness_source`, so later TCP and HTTP probes and dependency blocking can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
+`status.py` separates *running* from *ready*. Compose health is the only readiness source DevDock currently evaluates and is recorded per row as `readiness_source`, so the TCP and HTTP probes the profile can now declare, and dependency blocking, can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
+
+The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Nothing evaluates them yet. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
 
 ## Adapter boundary
 
