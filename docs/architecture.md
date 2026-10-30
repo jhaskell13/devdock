@@ -44,6 +44,12 @@ Dependency listing (adapters/compose.py)
   ├─ the flag stops ${VAR}, env_file, and .env values being rendered into the output
   └─ keeps service names, depends_on edges, and health declarations; discards the rest
 
+Wait engine (orchestrate.py)
+  ├─ injected Clock, Observer, and CancelToken; nothing here sleeps or runs a command
+  ├─ a service's own budget starts when it is running and unblocked, not when the wait began
+  ├─ fails fast on a regression or an unmeetable condition rather than timing out
+  └─ flapping is counted and reported; stability is decided by consecutive successes
+
 Dependency graph (graph.py)
   ├─ merges Compose-declared and profile-declared dependencies; both are honored
   ├─ rejects undeclared services, contradictory conditions, unmeetable health waits, cycles
@@ -96,6 +102,22 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 The module stays pure. It decides *what* is worth probing — only running services, since a stopped service's port is free and whatever answers on it belongs to something else — and the probe callable it is handed does the connecting, defaulting to the real one and replaced in tests. That is the same shape as `lifecycle` defaulting to a real `ComposeAdapter`.
 
 Two classification rules are deliberate. A failing probe yields `starting` rather than `unhealthy`, because one sample is not evidence of a broken service and a probe, unlike a Compose health check, has no retry policy of its own to have exhausted; Compose health is taken at its word because Docker already applied one. And `exited_ok` separates an exit code of `0` from any other, which is what `service_completed_successfully` needs — while being honest that Docker cannot distinguish a completed task from a service stopped gracefully.
+
+### Waiting, and why each rule is there
+
+`orchestrate.py` polls snapshots until every service has settled. Its clock, its observer, and its cancellation flag are all injected, so the whole module is exercised without sleeping: a three-hundred-second deadline is reached in a few hundred iterations of arithmetic, which is what makes slow starts, flapping, and timeouts testable at all.
+
+Four rules carry most of the behavior.
+
+**A service's budget starts when it is running and unblocked**, not when the wait began. Without that, a service deep in the graph is charged for the time its ancestors took and times out for someone else's slowness. If a dependency later stops being satisfied, the clock is cleared again rather than continuing to run.
+
+**A blocked service is never settled**, however healthy it looks. The dependency condition was declared for a reason, and reporting success while one goes unmet would hide exactly what the wait was asked to watch — a service running happily against a database that never came up.
+
+**A regression fails fast.** A service that had succeeded and then exits, goes unhealthy, or becomes unrecognizable has gone somewhere it will not return from, and everything depending on it should not spend its own budget discovering that one service at a time. Merely losing readiness is *not* a regression: dropping back to `starting` is flapping, which is counted, reported, and waited through, because the consecutive-success requirement is what decides whether a service has steadied.
+
+**A condition that can never be met is named rather than waited out.** Waiting for health on a service that reports none would otherwise consume the dependent's whole budget and then blame the timeout instead of the cause. This is where the check deferred from the Compose configuration reader lands: absence of a health check in the Compose file is not proof, but a *running* container still reporting no health after a short grace period is.
+
+A condition is a statement about the dependency alone. `service_healthy` asks whether its health check passes, exactly as it does in Compose, and says nothing about whether that dependency's own dependencies are satisfied. So the engine does not guarantee that a dependency settles before its dependent; it guarantees that nothing is reported ready with a condition outstanding.
 
 `ProjectStatus.all_ready` remains the single-sample predicate. The temporal policy — how many consecutive successes a source needs, flapping, deadlines — belongs to the wait engine, which has more than one sample to reason about.
 
