@@ -31,6 +31,12 @@ Status (status.py)
   ├─ classify_readiness(state, health) is the single source of that mapping
   └─ joins declared order, managed containers, and observations; ignores unproven ones
 
+Dependency graph (graph.py)
+  ├─ merges Compose-declared and profile-declared dependencies; both are honored
+  ├─ rejects undeclared services, contradictory conditions, unmeetable health waits, cycles
+  ├─ reports every problem in one pass; one representative path per cyclic group
+  └─ returns sorted startup layers; pure functions over plain mappings
+
 Failures (failures.py)
   ├─ literal-substring markers map runtime prose to a stable kind
   └─ returns only DevDock's own code, summary, and remedy; never quotes output
@@ -74,7 +80,9 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 
 `status.py` separates *running* from *ready*. Compose health is the only readiness source DevDock currently evaluates and is recorded per row as `readiness_source`, so the TCP and HTTP probes the profile can now declare, and dependency blocking, can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
 
-The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Nothing evaluates them yet. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
+The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
+
+`graph.py` turns those declarations plus the Compose file's own into a startup order. It takes plain mappings and returns either a `DependencyGraph` with sorted layers or a `GraphProblems` listing everything wrong at once, in the same `X | Y` return style as `plan_stop`. It holds no CLI codes: problems carry a structural `kind` and the command that builds the graph maps those to the codes a user sees, so the graph rules stay testable without the command vocabulary. Tarjan's algorithm is written iteratively because a deeply chained Compose file must produce a refusal rather than a `RecursionError`. No command builds a graph yet.
 
 ## Adapter boundary
 

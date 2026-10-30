@@ -71,6 +71,26 @@ Service names, both as keys and as dependency targets, must match `[a-zA-Z0-9][a
 | `service_completed_successfully` | The dependency exited with code `0`. |
 | `service_ready` | The dependency satisfies *every* readiness source DevDock knows for it, including the probes below. This condition is DevDock's own; Compose has no equivalent. |
 
+#### How the two sources of dependencies combine
+
+The Compose file and the profile both declare dependencies, and DevDock honors both rather than letting one replace the other. An edge declared in both places must satisfy both conditions.
+
+`service_started`, `service_healthy`, and `service_ready` form one scale: each implies the one before it, so the stricter condition wins. `service_completed_successfully` absorbs `service_started`, because a service that exited successfully did start. It **contradicts** `service_healthy` and `service_ready`, which require the service to still be running; DevDock reports that contradiction rather than picking one.
+
+The merged graph must produce a startup order. These are reported together in one pass, so a project with several mistakes is not fixed one error at a time:
+
+| Rejected | Reported as |
+| --- | --- |
+| A dependency naming a service the Compose file does not declare | The dependency and the list of declared services |
+| A `services` key naming a service the Compose file does not declare | The name, with the suggestion to correct it or add the service |
+| Two conditions on one edge that cannot both hold | Both conditions and where each came from |
+| `service_healthy` on a service with no Compose health check | That the condition can never be met, with three ways to fix it |
+| A dependency cycle | One concrete path through each cyclic group, as `a depends on b depends on a`, plus every service involved |
+
+A cycle is reported once per cyclic group with a single representative path, not once per distinct cycle, because enumerating every cycle can be exponential. Breaking the reported path and running again reveals whatever remains. Rejecting a condition does not hide a cycle the same edge takes part in.
+
+The startup order itself is a sequence of layers. Every service in a layer may start once every earlier layer has met its conditions, services within a layer are independent of one another, and both the layers and the services inside them are sorted, so the plan a user sees does not move between runs.
+
 `readiness` lists the probes that must pass before DevDock calls a service ready. Every declared probe must pass, and a Compose health check, when the container has one, is checked as well. A service with no probes and no health check can only be reported as running; DevDock does not infer readiness from uptime.
 
 | Probe field | Applies to | Contract |
