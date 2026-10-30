@@ -223,19 +223,40 @@ The command run is `docker compose --project-directory <root> --file <compose fi
 
 `devdock status` is read-only. It needs a Compose file inside the project and a responsive Docker daemon; it does not require the profile's checks to pass, because a status report is most useful when something is wrong.
 
-It combines three sources: the ownership inventory (which containers are provably DevDock's), `docker compose config --services` (which services the current Compose file declares; names only, no rendered values), and `docker compose ps --all --format json` (state, health, exit code, published ports). From the runtime report DevDock keeps only ID, name, service, state, health, exit code, and publishers; image, command, and labels are discarded at parse time.
+It combines three sources: the ownership inventory (which containers are provably DevDock's), `docker compose config --services` (which services the current Compose file declares; names only, no rendered values), and `docker compose ps --all --format json` (state, health, exit code, published ports). From the runtime report DevDock keeps only ID, name, service, state, health, exit code, and publishers; image, command, and labels are discarded at parse time. It then runs the readiness probes the profile declares for each **running** service.
 
-Each row carries a readiness class. These are the vocabulary later readiness work builds on:
+### Readiness sources
+
+A service's readiness sources are its Compose health, when the container reports any, plus every `tcp` or `http` probe declared for it under `services` in `devdock.yaml`. A service is `ready` only when **every** one of its sources agrees. A service with no source at all can only be shown to be running.
+
+Each source is listed under the table with its own result, whether it passed or not, because a readiness class alone does not say what was checked:
+
+```text
+SERVICE  CONTAINER          STATE    HEALTH   READINESS       PORTS
+web      ...-web-1          running  healthy  ready           127.0.0.1:19311->80/tcp
+api      ...-api-1          running  -        starting        -
+migrate  ...-migrate-1      exited   -        exited cleanly  -
+  web: [PASS] compose health reports healthy
+  web: [PASS] http GET 127.0.0.1:19311/healthz answered 200
+  api: [FAIL] tcp 127.0.0.1:19312 refused the connection
+  migrate: exited with code 0
+Summary: 1 exited cleanly, 1 ready, 1 starting.
+```
+
+Only running services are probed. A stopped service's port is free, so whatever answers there belongs to something else. If a probe fails on a port the service does not publish, DevDock says so in a note: probing the port inside the container rather than the published one is the usual cause.
 
 | Readiness | Meaning |
 | --- | --- |
-| `ready` | Running and the Compose health check passes. |
-| `running (readiness unverified)` | Running with no health check. DevDock can show the container is alive, not that the service is serving. |
-| `starting` | Running; the health check has not passed yet. |
-| `unhealthy` | Running; the health check is failing. |
-| `stopped` | The container exists but is not running. The exit code is shown when known. |
+| `ready` | Running, and every readiness source agrees. |
+| `running (readiness unverified)` | Running with no readiness source at all. DevDock can show the container is alive, not that the service is serving. |
+| `starting` | Running; at least one source has not passed yet. |
+| `unhealthy` | Running; the Compose health check is failing. |
+| `exited cleanly` | Exited with code `0`. This is what a completed one-shot task looks like; it is also what a service that was stopped gracefully looks like, which Docker does not distinguish either. |
+| `stopped` | The container exists, is not running, and did not exit with `0`. The exit code is shown when known. |
 | `missing` | Declared in the Compose file; no DevDock-managed container exists. |
 | `unknown` | The runtime reported a state DevDock does not model. |
+
+A failing probe reports `starting`, not `unhealthy`. One sample is not evidence that a service is broken — a probe failing is exactly what a service looks like while it is coming up, and unlike a Compose health check a probe has no retry policy of its own to have exhausted. Compose health is the exception: Docker already applied one before calling a container unhealthy, so a reported `unhealthy` is taken at its word and outranks passing probes.
 
 Services are listed in declared order, one row per container when a service has replicas, followed by any DevDock-managed containers no longer declared in the current Compose file. Runtime-reported containers DevDock cannot prove it created are ignored and counted in a note. Resources under the project name that fail the ownership rules are listed separately as not managed.
 

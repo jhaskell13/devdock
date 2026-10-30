@@ -27,8 +27,10 @@ Lifecycle (lifecycle.py)
   └─ returns redacted display lines and a stable code
 
 Status (status.py)
-  ├─ readiness classes: ready, running, starting, unhealthy, stopped, missing, unknown
-  ├─ classify_readiness(state, health) is the single source of that mapping
+  ├─ readiness classes: ready, running, starting, unhealthy, exited_ok, stopped, missing, unknown
+  ├─ classify_readiness(state, health, exit_code, sources) is the single source of that mapping
+  ├─ a service is ready only when every source agrees; no source means running, not ready
+  ├─ decides what to probe (running services only); the injected probe callable connects
   └─ joins declared order, managed containers, and observations; ignores unproven ones
 
 Readiness probes (probes.py)
@@ -89,7 +91,13 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 
 ## Readiness foundation
 
-`status.py` separates *running* from *ready*. Compose health is the only readiness source DevDock currently evaluates and is recorded per row as `readiness_source`, so the TCP and HTTP probes the profile can now declare, and dependency blocking, can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
+`status.py` separates *running* from *ready*, and now evaluates every source a service has: its Compose health, when the container reports any, plus each `tcp` or `http` probe the profile declares. A service is `ready` only when all of them agree, and one with no source at all is `running` — alive, unverified. Each source's result is kept per service and printed, because a readiness class on its own does not say what was checked.
+
+The module stays pure. It decides *what* is worth probing — only running services, since a stopped service's port is free and whatever answers on it belongs to something else — and the probe callable it is handed does the connecting, defaulting to the real one and replaced in tests. That is the same shape as `lifecycle` defaulting to a real `ComposeAdapter`.
+
+Two classification rules are deliberate. A failing probe yields `starting` rather than `unhealthy`, because one sample is not evidence of a broken service and a probe, unlike a Compose health check, has no retry policy of its own to have exhausted; Compose health is taken at its word because Docker already applied one. And `exited_ok` separates an exit code of `0` from any other, which is what `service_completed_successfully` needs — while being honest that Docker cannot distinguish a completed task from a service stopped gracefully.
+
+`ProjectStatus.all_ready` remains the single-sample predicate. The temporal policy — how many consecutive successes a source needs, flapping, deadlines — belongs to the wait engine, which has more than one sample to reason about.
 
 The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
 

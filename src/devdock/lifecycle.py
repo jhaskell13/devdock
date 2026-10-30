@@ -25,8 +25,9 @@ from devdock.ownership import (
     ownership_scope,
     resolves_inside,
 )
+from devdock.probes import run_probe
 from devdock.redaction import redact, summarize
-from devdock.status import ProjectStatus, build_service_statuses
+from devdock.status import ProbeCallable, ProjectStatus, build_service_statuses
 
 
 @dataclass(frozen=True)
@@ -265,6 +266,7 @@ def project_status(
     root: Path,
     *,
     adapter: RuntimeAdapter | None = None,
+    probe: ProbeCallable = run_probe,
 ) -> LifecycleResult:
     """Report per-service state, health, readiness, and ports without mutating anything.
 
@@ -287,7 +289,13 @@ def project_status(
         project_root=scope.root,
         compose_file=compose_file,
     )
-    services, notes = build_service_statuses(declared.names, assessment.managed, observed.items)
+    services, notes = build_service_statuses(
+        declared.names,
+        assessment.managed,
+        observed.items,
+        profiles=profile.services,
+        probe=probe,
+    )
     errors = list(assessment.errors)
     if declared.error:
         errors.append(declared.error)

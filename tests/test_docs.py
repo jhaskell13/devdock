@@ -137,3 +137,15 @@ def test_every_readiness_probe_type_is_documented() -> None:
     assert not undocumented, (
         f"probe types accepted by the profile but absent from docs: {undocumented}"
     )
+
+
+def test_every_readiness_class_has_a_label_and_is_documented() -> None:
+    from devdock.status import READINESS_LABELS, Readiness
+
+    classes = set(get_args(Readiness))
+    assert classes == set(READINESS_LABELS), "a readiness class has no display label"
+    undocumented = sorted(
+        label for readiness, label in READINESS_LABELS.items() if f"`{label}`" not in CLI_DOC
+    )
+
+    assert not undocumented, f"readiness labels absent from docs/cli.md: {undocumented}"

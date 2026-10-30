@@ -12,7 +12,7 @@ Milestones 0 through 2 are complete. The CLI can create a profile, discover proj
 | `devdock inspect [DIRECTORY]` | Finds the nearest project profile or common Compose file, reports the marker used, nested roots, and known project files. | No. |
 | `devdock check [DIRECTORY]` | Validates the profile and checks declared Python, Docker/Compose, paths, ports, and environment requirements. Reports warnings and prerequisite-dependent checks it could not run. | No. |
 | `devdock up [DIRECTORY]` | Runs the checks, proves which Compose resources DevDock owns, then starts the project's services detached. Refuses before acting if any gate fails. | Starts containers and networks for the derived Compose project. |
-| `devdock status [DIRECTORY]` | Reports each service's container, state, health, readiness class, and published ports. Keeps "running" distinct from "ready". | No. |
+| `devdock status [DIRECTORY]` | Reports each service's container, state, health, readiness class, and published ports, running any readiness probes the profile declares and showing each source's result. Keeps "running" distinct from "ready". | No. |
 | `devdock down [DIRECTORY]` | Shows a plan, asks for confirmation (or `--yes`), then stops and removes the project's DevDock-managed containers and networks. `--dry-run` previews only. | Removes containers and networks it created. Never volumes. |
 | `devdock --help` | Shows available commands and options. | No. |
 
@@ -112,7 +112,7 @@ The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml
 | `required_files` | No | Project-relative files that must exist. Absolute paths, backslashes, and lexical traversal are rejected. |
 | `required_dirs` | No | Project-relative directories that must exist. Symlinks resolving outside the project fail the check. |
 | `ports` | No | TCP ports from 1 through 65535 to probe on `127.0.0.1`. Availability is a point-in-time observation and may change immediately. |
-| `services` | No | Per-service `depends_on` conditions and `readiness` probes. Validated when the profile loads; **no command acts on them yet**. They will drive `devdock up --wait`; see [`ROADMAP.md`](ROADMAP.md). |
+| `services` | No | Per-service `depends_on` conditions and `readiness` probes. `status` runs the probes and reports each source; `depends_on` is validated but not yet used for ordering, which arrives with `devdock up --wait`. See [`ROADMAP.md`](ROADMAP.md). |
 
 Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands. Readiness probes are limited to TCP and HTTP against loopback; there is no probe type that runs a command.
 

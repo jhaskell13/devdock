@@ -24,6 +24,7 @@ from devdock.lifecycle import (
     start_project,
 )
 from devdock.ownership import derive_project_name, ownership_scope
+from devdock.probes import ProbeResult
 
 READY = ComposeCapabilities(
     executable="docker", compose_cli="available", compose_cli_returncode=0, daemon="available"
@@ -974,3 +975,56 @@ def test_all_three_commands_share_identical_gate_wording(tmp_path: Path) -> None
         r.summary.endswith("this user may not connect to the Docker daemon.")
         for r in (up, status, down)
     )
+
+
+def test_status_probes_the_services_the_profile_declares(tmp_path: Path) -> None:
+    """The profile's probes must reach the prober, and their results the report."""
+
+    asked: list[int] = []
+
+    def prober(probe: object) -> ProbeResult:
+        asked.append(probe.port)  # type: ignore[attr-defined]
+        return ProbeResult(True, "answered 200")
+
+    root = make_project(tmp_path)
+    declaring = ProjectProfile.model_validate(
+        {
+            "schema_version": 1,
+            "project": "sample",
+            "compose_file": "compose.yaml",
+            "services": {"web": {"readiness": [{"type": "http", "port": 18080}]}},
+        }
+    )
+    scope = ownership_scope(declaring, root)
+    web = managed(scope, f"{scope.project_name}-web-1", "web")
+    adapter = StatusAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(scope.project_name, containers=(web,)),
+        observed=ServiceObservations(
+            items=(ServiceObservation(web.id, web.name, "web", "running", "", None),)
+        ),
+    )
+
+    result = project_status(declaring, root, adapter=adapter, probe=prober)
+
+    assert asked == [18080]
+    assert result.ok
+    assert any("[PASS] http GET 127.0.0.1:18080/ answered 200" in line for line in result.lines)
+
+
+def test_status_does_not_probe_a_service_the_profile_does_not_declare(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    web = managed(scope, f"{scope.project_name}-web-1", "web")
+    adapter = StatusAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(scope.project_name, containers=(web,)),
+        observed=ServiceObservations(
+            items=(ServiceObservation(web.id, web.name, "web", "running", "", None),)
+        ),
+    )
+
+    def refuse(probe: object) -> ProbeResult:
+        raise AssertionError("no probe should run for an undeclared service")
+
+    assert project_status(profile(), root, adapter=adapter, probe=refuse).ok
