@@ -111,6 +111,29 @@ The startup order itself is a sequence of layers. Every service in a layer may s
 
 HTTP probes use plain `http://`. A TLS endpoint should use a `tcp` probe for now; DevDock will not add an option to skip certificate verification.
 
+#### What a probe does, and what it reports
+
+A probe makes one bounded attempt. Before connecting, the declared host is checked against the loopback rule again and then resolved, and **every** address it resolves to must be loopback or the probe fails without connecting. DevDock then contacts that checked address rather than resolving a second time, so what was validated is what is reached. For an HTTP probe the declared host is still sent as the `Host` header, so name-based routing works.
+
+HTTP probes send no credentials and no cookies, ignore any proxy configured in the environment, do not follow redirects, and **never read the response body**. A redirect is reported as its status code; following one would let the endpoint choose where DevDock connects next, which is what the loopback rule exists to prevent.
+
+A probe reports one of these phrases and nothing else. No part of what the endpoint sent — no body, no header, no error text — is ever repeated, because a probe target can be made to answer with anything.
+
+| Result | Meaning |
+| --- | --- |
+| `accepted a connection` | TCP only: the connection was established. The service is listening; whether it can serve is not known. |
+| `answered N` | HTTP: status `N`, which the probe accepts. |
+| `answered N, which is not accepted` | HTTP: status `N`, outside `expect_status` or the default `200`–`399`. |
+| `refused the connection` | Nothing is listening on that port. |
+| `accepted the connection, then closed it without answering` | HTTP: the port is open but the service hung up. This is normal for the whole window between a service binding its port and being able to serve, which is exactly what a probe is for. |
+| `did not answer a readable HTTP response` | HTTP: something answered, but not HTTP. |
+| `did not answer within Ns` | The attempt exceeded the probe's `timeout`. |
+| `could not be reached` | The connection failed for another reason. |
+| `could not be resolved` | The host could not be looked up. |
+| `resolved to an address that is not loopback` | The name is loopback-shaped but this machine resolves it elsewhere. Nothing was contacted. |
+
+A TCP probe can pass where an HTTP probe on the same port fails. That is the point of having both: an open port proves a process bound it, not that it is serving.
+
 ## Output and exit behavior
 
 - `init` prints the created profile path to standard output and exits `0`. If the profile already exists, it writes an error to standard error and exits `1` without replacing the file.

@@ -31,6 +31,12 @@ Status (status.py)
   ├─ classify_readiness(state, health) is the single source of that mapping
   └─ joins declared order, managed containers, and observations; ignores unproven ones
 
+Readiness probes (probes.py)
+  ├─ Network performs; run_probe decides. Tests inject a fake and open no socket
+  ├─ host re-checked, resolved, every address proven loopback, then that address contacted
+  ├─ HTTP: no proxy, no redirects, no cookies, no credentials, body never read
+  └─ results use a closed vocabulary defined in the module; endpoint text is never repeated
+
 Dependency listing (adapters/compose.py)
   ├─ `docker compose config --format json --no-interpolate`
   ├─ the flag stops ${VAR}, env_file, and .env values being rendered into the output
@@ -86,6 +92,16 @@ Unknown fields are rejected so typos do not silently weaken a check. Profile val
 `status.py` separates *running* from *ready*. Compose health is the only readiness source DevDock currently evaluates and is recorded per row as `readiness_source`, so the TCP and HTTP probes the profile can now declare, and dependency blocking, can be added as new sources without changing the classes or the renderer. `ProjectStatus.all_ready` is informational now and is the predicate a future `--wait` will poll.
 
 The profile's `services` block is the declaration half of that work: `config.py` owns the dependency conditions and probe definitions, their safety rules, and their defaults. Keeping the schema ahead of the engine means the format's constraints — loopback-only probes, no command probes, service names that cannot be mistaken for options — are settled and tested before any code acts on them.
+
+### Probing without becoming a way out of the machine
+
+`probes.py` is the only module that opens a network connection, and the target comes from a profile that may have arrived with a cloned repository. It is split the same way commands are: `Network` performs the socket work and `run_probe` decides what the outcome means, so the policy is tested against a fake and the test suite opens no socket except the loopback listeners it starts in-process.
+
+The loopback rule is enforced twice, for two different reasons. `config.py` rejects a non-loopback host when the profile loads, which stops a profile naming another machine. `probes.py` re-checks it, resolves it, and requires *every* resolved address to be loopback, which stops a name that is loopback-shaped but resolves elsewhere — something `localhost` can do depending on how a host is configured. DevDock then connects to the address it just validated instead of resolving again, so there is no window between the check and the connection. The declared host still travels as the `Host` header.
+
+The HTTP opener is built by listing handlers rather than taking `build_opener`'s defaults, which include file, FTP, data, and HTTPS handlers this has no use for. `ProxyHandler({})` is not a default and is the reason a `http_proxy` variable in the environment cannot route a loopback probe through a proxy. Redirects are reported as their status rather than followed, because following one hands the endpoint the choice of DevDock's next destination. The response body is never read at all.
+
+Every result carries a phrase defined in that module, so the whole vocabulary is reviewable in one place and no endpoint text can reach a terminal. One distinction is worth the code it costs: a connection that is accepted and then dropped is reported as such rather than as an unreachable host, because that is precisely what a service does between binding its port and being able to serve — the window a readiness probe exists to watch. It arrives as two different exceptions depending on whether the service hung up before or after reading the request, and both are mapped to the same phrase.
 
 ### Reading dependencies without reading secrets
 

@@ -36,7 +36,7 @@ def _has_control_characters(text: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in text)
 
 
-def _is_loopback(host: str) -> bool:
+def is_loopback(host: str) -> bool:
     """Whether ``host`` can only address this machine.
 
     Readiness probes are the first DevDock feature that opens a connection to an
@@ -67,7 +67,7 @@ class ReadinessProbeBase(BaseModel):
     @field_validator("host")
     @classmethod
     def host_must_be_loopback(cls, value: str) -> str:
-        if not _is_loopback(value):
+        if not is_loopback(value):
             raise ValueError(
                 "readiness probes may only target loopback: 127.0.0.1, ::1, or localhost"
             )
