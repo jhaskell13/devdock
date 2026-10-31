@@ -183,19 +183,22 @@ def start_project(
     if isinstance(compose_file, LifecycleResult):
         return compose_file
 
-    planned = project_graph(profile, scope, compose_file, runtime, "UP")
-    if isinstance(planned, LifecycleResult):
-        return planned
-
+    # Ownership before the graph: it is the safety gate, it is the one a user
+    # most needs to hear about first, and it costs two fewer Docker calls to
+    # refuse on. A bad graph is still caught before anything is started.
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
-    preview = assessment.explain() + planned.notes + advisories
     if not assessment.safe_to_act:
         return _refusal(
             "UP_OWNERSHIP_CONFLICT",
             "Refusing to start: resources under this project name are not DevDock's.",
-            preview,
+            assessment.explain() + advisories,
             "Resolve the conflicts above, then retry.",
         )
+
+    planned = project_graph(profile, scope, compose_file, runtime, "UP")
+    if isinstance(planned, LifecycleResult):
+        return planned
+    preview = assessment.explain() + planned.notes + advisories
 
     outcome = runtime.start(
         project_name=scope.project_name,

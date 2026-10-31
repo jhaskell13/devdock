@@ -1355,3 +1355,43 @@ def test_a_cancelled_wait_leaves_the_project_alone(tmp_path: Path) -> None:
 
     assert result.code == "WAIT_INTERRUPTED"
     assert any("Nothing was stopped or removed" in line for line in result.lines)
+
+
+def test_an_ownership_conflict_is_reported_before_the_graph_is_even_read(
+    tmp_path: Path,
+) -> None:
+    """Ownership is the safety gate; a user hears about it first, and it costs less."""
+
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    squatter = ContainerRecord(id="q", name=f"{scope.project_name}-web-1", state="running")
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        # A graph bad enough to refuse on, which must not be what is reported.
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_started"),
+            DeclaredDependency("db", "web", "service_started"),
+        ),
+        inventory=ResourceInventory(scope.project_name, containers=(squatter,)),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_OWNERSHIP_CONFLICT"
+    assert adapter.starts == []
+
+
+def test_a_bad_graph_is_still_caught_when_ownership_is_clean(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_started"),
+            DeclaredDependency("db", "web", "service_started"),
+        ),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_DEPENDENCY_CYCLE"
+    assert adapter.starts == []

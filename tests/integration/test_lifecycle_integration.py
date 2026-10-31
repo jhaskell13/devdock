@@ -61,7 +61,10 @@ def test_a_project_can_be_started_queried_and_stopped(project: Path, host_port: 
 
     started = run_devdock(["up"], project)
     assert started.returncode == 0, started.stdout + started.stderr
-    assert "UP_STARTED" in started.stdout
+    # The demo includes a service with nothing to verify it, on purpose, so a
+    # fully successful start is reported as verified-where-it-could-be.
+    assert "UP_READY_UNVERIFIED" in started.stdout
+    assert "worker" in started.stdout
 
     queried = run_devdock(["status"], project)
     assert queried.returncode == 0, queried.stdout + queried.stderr
@@ -223,10 +226,7 @@ def test_unreachable_registry_is_classified_as_a_pull_failure(project: Path) -> 
     so this needs no network access.
     """
 
-    (project / "compose.yaml").write_text(
-        "services:\n  ghost:\n    image: localhost:1/devdock-nonexistent:no-such-tag\n",
-        encoding="utf-8",
-    )
+    _only_service(project, "ghost", "localhost:1/devdock-nonexistent:no-such-tag")
 
     result = start_project(profile_at(project), project, adapter=adapter(), timeout=180)
 
@@ -238,10 +238,7 @@ def test_unreachable_registry_is_classified_as_a_pull_failure(project: Path) -> 
 def test_missing_tag_is_classified_as_image_not_found(project: Path) -> None:
     """A reachable registry that has no such tag is a missing image."""
 
-    (project / "compose.yaml").write_text(
-        "services:\n  ghost:\n    image: busybox:devdock-no-such-tag-exists\n",
-        encoding="utf-8",
-    )
+    _only_service(project, "ghost", "busybox:devdock-no-such-tag-exists")
 
     result = start_project(profile_at(project), project, adapter=adapter(), timeout=180)
 
@@ -267,7 +264,7 @@ def test_compose_ps_json_fields_parse_against_the_real_runtime(
 
     assert observations.error is None
     assert observations.skipped == 0, "runtime reported entries DevDock could not parse"
-    assert len(observations.items) == 2
+    assert len(observations.items) == 3
     web = next(item for item in observations.items if item.service == "web")
     assert web.id and web.name and web.state == "running"
     assert any(port.host_port == host_port and port.container_port == 80 for port in web.ports)
@@ -308,7 +305,9 @@ def test_up_waits_and_reports_what_proved_each_service_ready(project: Path) -> N
     assert result.returncode == 0, result.stdout + result.stderr
     text = result.stdout
 
-    assert "UP_READY" in text
+    # The exact code, not a prefix of it: UP_READY would also match
+    # UP_READY_UNVERIFIED, which is what this project actually produces.
+    assert "UP_READY_UNVERIFIED" in text
     assert "Startup order" in text
     assert "web depends on migrate (service_completed_successfully" in text
     assert "worker depends on web (service_healthy" in text
@@ -323,7 +322,7 @@ def test_a_second_up_is_already_ready(project: Path) -> None:
     result = run_devdock(["up"], project)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "UP_READY" in result.stdout
+    assert "UP_READY_UNVERIFIED" in result.stdout
 
 
 def test_wait_reports_ready_without_starting_anything(project: Path, scope: OwnershipScope) -> None:
@@ -333,7 +332,7 @@ def test_wait_reports_ready_without_starting_anything(project: Path, scope: Owne
     result = run_devdock(["wait"], project)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "WAIT_READY" in result.stdout
+    assert "WAIT_READY_UNVERIFIED" in result.stdout
     after = {item.id for item in adapter().list_project_resources(scope.project_name).containers}
     assert before == after, "wait must not create or replace anything"
 
@@ -400,17 +399,73 @@ def test_a_cycle_that_only_exists_after_merging_is_refused_before_anything_start
     assert inventory.containers == (), "nothing may be created when the graph is refused"
 
 
-def test_a_cycle_inside_the_compose_file_is_reported_by_compose(project: Path) -> None:
-    """Compose rejects it when the services are listed, before DevDock's graph."""
+def test_a_cycle_inside_the_compose_file_is_caught_by_the_checks(project: Path) -> None:
+    """Compose rejects it, and `up` meets that before it ever builds a graph.
 
+    ``up`` runs the profile's own checks first, and those parse the Compose
+    file, so a cycle written inside it never reaches DevDock's graph. The
+    message is Compose's finding, reported through ``check``.
+    """
+
+    _cyclic_compose(project)
+
+    result = run_devdock(["up"], project)
+
+    assert result.returncode == 1
+    assert "UP_PREFLIGHT_FAILED" in result.stderr, result.stderr
+    assert "COMPOSE_CONFIG_INVALID" in result.stderr
+
+
+def test_wait_reports_an_unreadable_compose_file_as_such(project: Path) -> None:
+    """``wait`` runs no checks, so it is where the config gate itself shows up."""
+
+    _cyclic_compose(project)
+
+    result = run_devdock(["wait"], project)
+
+    assert result.returncode == 1
+    assert "WAIT_CONFIG_UNREADABLE" in result.stderr, result.stderr
+
+
+def _cyclic_compose(project: Path) -> None:
     (project / "compose.yaml").write_text(
         "services:\n"
         '  a: {image: busybox:stable, command: ["true"], depends_on: [b]}\n'
         '  b: {image: busybox:stable, command: ["true"], depends_on: [a]}\n',
         encoding="utf-8",
     )
+    _plain_profile(project)
 
-    result = run_devdock(["up"], project)
 
-    assert result.returncode == 1
-    assert "UP_CONFIG_UNREADABLE" in result.stderr, result.stderr
+def _only_service(project: Path, name: str, image: str) -> None:
+    """Replace the demo's Compose file with a single service, and the profile with it.
+
+    Both have to change together: the profile declares readiness for the
+    demo's own services, and DevDock refuses to start a project whose profile
+    configures a service the Compose file does not declare.
+    """
+
+    (project / "compose.yaml").write_text(
+        f"services:\n  {name}:\n    image: {image}\n", encoding="utf-8"
+    )
+    _plain_profile(project)
+
+
+def _plain_profile(project: Path) -> None:
+    """The demo profile minus the parts tied to the demo's own services.
+
+    ``runtimes: docker: compose`` stays, because it is what makes ``up`` parse
+    the Compose file during its checks, and that decides which gate reports a
+    broken file. A profile without it skips that check and reaches a different
+    one, which would make these tests assert the wrong code for the wrong
+    reason.
+    """
+
+    (project / CONFIG_NAME).write_text(
+        "schema_version: 1\n"
+        "project: devdock-demo\n"
+        "runtimes:\n"
+        "  docker: compose\n"
+        "compose_file: compose.yaml\n",
+        encoding="utf-8",
+    )

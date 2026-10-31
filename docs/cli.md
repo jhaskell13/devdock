@@ -90,7 +90,7 @@ The merged graph must produce a startup order. These are reported together in on
 
 A cycle is reported once per cyclic group with a single representative path, not once per distinct cycle, because enumerating every cycle can be exponential. Breaking the reported path and running again reveals whatever remains. Rejecting a condition does not hide a cycle the same edge takes part in.
 
-A cycle written entirely inside the Compose file is rejected by Compose itself when DevDock lists the services, and surfaces as `UP_CONFIG_UNREADABLE` with Compose's own wording. `_DEPENDENCY_CYCLE` is for the cycles only the merged graph can see: ones where neither the Compose file nor `devdock.yaml` is cyclic on its own.
+A cycle written entirely inside the Compose file never reaches DevDock's graph. Compose rejects such a file, and `up` meets that first, in the profile's own checks: it reports `UP_PREFLIGHT_FAILED` with the `COMPOSE_CONFIG_INVALID` finding. `devdock wait` runs no checks, so there the same file reports `WAIT_CONFIG_UNREADABLE`. `_DEPENDENCY_CYCLE` is for the cycles only the merged graph can see — ones where neither the Compose file nor `devdock.yaml` is cyclic on its own.
 
 A `service_healthy` wait is only refused when the Compose file **disables** the health check. A service that simply does not declare one may still inherit a `HEALTHCHECK` from its image, which the Compose configuration cannot show, so refusing there would reject projects that work. That case is reported by the wait instead, once a running container shows whether health is being reported at all.
 
