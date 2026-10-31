@@ -12,7 +12,7 @@ import itertools
 import random
 import shutil
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -116,3 +116,38 @@ def host_port(project: Path) -> int:
     """The host port this test's web service publishes."""
 
     return int((project / ".devdock-test-port").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def synthetic(docker_daemon: None, tmp_path: Path) -> Iterator[Callable[[str, str], Path]]:
+    """Build a throwaway project from Compose and profile text, and clean it up.
+
+    The demo project is shaped to show DevDock working. These tests need
+    projects shaped to make it fail in a particular way, so each writes its
+    own. Everything created is removed afterwards whatever the test did.
+    """
+
+    created: list[tuple[Path, str]] = []
+
+    def build(compose: str, profile: str = "") -> Path:
+        root = tmp_path / f"p{len(created)}"
+        root.mkdir()
+        (root / "compose.yaml").write_text(compose, encoding="utf-8")
+        (root / CONFIG_NAME).write_text(
+            profile
+            or (
+                "schema_version: 1\n"
+                "project: devdock-fault\n"
+                "runtimes:\n  docker: compose\n"
+                "compose_file: compose.yaml\n"
+            ),
+            encoding="utf-8",
+        )
+        created.append((root, ownership_scope(load_profile(root / CONFIG_NAME), root).project_name))
+        return root
+
+    try:
+        yield build
+    finally:
+        for root, name in created:
+            compose_teardown(root, name)
