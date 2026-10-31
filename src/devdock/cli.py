@@ -401,9 +401,10 @@ def down(
     if isinstance(plan, LifecycleResult):
         _render(plan)
         return
-    for line in plan.explain():
+    for line in spaced(plan.explain()):
         _echo(line)
     if dry_run:
+        _echo()
         _echo("[OK] DOWN_DRY_RUN: Nothing was changed.")
         return
     if plan.nothing_to_do:

@@ -707,3 +707,36 @@ def test_check_ends_with_a_count_of_what_it_found(tmp_path: Path) -> None:
     result = runner.invoke(app, ["check", str(tmp_path)])
 
     assert "Summary: 1 passed." in result.stdout
+
+
+def test_the_down_preview_is_grouped_like_every_other_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It was printed directly and so missed the spacing the rest gets."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    scope = ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path)
+    assessment = OwnershipAssessment(
+        scope=scope, managed=(), conflicts=(), networks=(), volumes=("vol",)
+    )
+    monkeypatch.setattr(
+        cli,
+        "plan_stop",
+        lambda *_a, **_k: StopPlan(
+            scope=scope,
+            assessment=assessment,
+            affected=(),
+            remaining=(),
+            networks=(),
+            volumes=("vol",),
+        ),
+    )
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert "" in lines, "the preview should be grouped"
+    assert lines[-1].startswith("[OK] DOWN_DRY_RUN")
+    assert lines[-2] == ""
