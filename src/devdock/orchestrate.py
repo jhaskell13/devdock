@@ -549,17 +549,13 @@ def wait_for_ready(
                             elapsed=now,
                             launch_failure=failure,
                         )
-                    # Judged on the next pass, once the runtime has been asked
-                    # what the new containers are actually doing. The deadline
-                    # is still checked here: launching is where the time goes,
-                    # so skipping the check on these passes let an N-layer
-                    # project overshoot it by the whole of its own start.
-                    overran = _expired(graph, tracker, now, ready_timeout, deadline, require_ready)
-                    if overran is not None:
-                        return _outcome(*overran, tracker=tracker, elapsed=now)
-                    ticker.sleep(interval)
-                    continue
-
+            # The verdict runs on every pass, launching or not. Skipping it
+            # here looked safe -- the services just launched are not in this
+            # snapshot yet -- but it also skipped the bookkeeping that marks
+            # the *other* services settled, so a service could be called
+            # overdue on the very pass it became ready. A service that was
+            # just launched is simply missing from the snapshot, which this
+            # already treats as pending.
             settled = _evaluate(graph, tracker, now, require_ready)
             if settled is not None:
                 return _outcome(*settled, tracker=tracker, elapsed=now)

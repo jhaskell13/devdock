@@ -1072,3 +1072,44 @@ def test_replicas_that_all_agree_are_ready() -> None:
     outcome, _ = run(graph_for(["web"]), script)
 
     assert outcome.status == "ready"
+
+
+def test_a_service_is_not_called_overdue_on_the_pass_it_became_ready() -> None:
+    """The verdict must run on launching passes too.
+
+    Skipping it there looked harmless -- the services just launched are not
+    in that snapshot yet -- but it also skipped the bookkeeping that marks
+    the *other* services settled, so one could be reported as timed out
+    while the same report showed it ready.
+    """
+
+    clock = FakeClock()
+    launched: list[str] = []
+
+    def launcher(batch: tuple[str, ...]) -> None:
+        clock.time += 6.0  # longer than the per-service budget below
+        launched.extend(batch)
+        return None
+
+    def observe() -> Snapshot:
+        return Snapshot(
+            tuple(
+                status(name, "ready", sources=[health(True)])
+                if name == "db"
+                else status(name, "running")
+                for name in launched
+            )
+        )
+
+    outcome = wait_for_ready(
+        graph_for(["db", "web"], {"web": {"db": "service_healthy"}}),
+        observe,
+        clock=clock,
+        launcher=launcher,  # type: ignore[arg-type]
+        ready_timeout=5,
+        deadline=600,
+    )
+
+    assert outcome.ok, outcome.explain()
+    db = next(item for item in outcome.progress if item.service == "db")
+    assert db.reached_success and db.succeeded_at is not None
