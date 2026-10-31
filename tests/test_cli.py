@@ -610,3 +610,39 @@ def test_wait_does_not_offer_a_way_to_mutate_the_project() -> None:
 
     for mutating in ("--yes", "--dry-run", "--show-output", "--timeout "):
         assert mutating not in text
+
+
+def test_init_points_the_profile_at_a_compose_file_it_can_see(tmp_path: Path) -> None:
+    """A starter profile that ignores the project is a second thing to configure."""
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0
+    written = load_profile(tmp_path / "devdock.yaml")
+    assert written.compose_file == Path("compose.yaml")
+    assert written.runtimes == {"docker": "compose"}
+    assert "Found compose.yaml" in result.stdout
+
+
+def test_init_claims_no_runtime_when_there_is_no_compose_file(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", str(tmp_path)])
+
+    written = load_profile(tmp_path / "devdock.yaml")
+    assert written.compose_file is None and written.runtimes == {}
+    assert "No Compose file was found" in result.stdout
+
+
+def test_an_initialized_compose_project_passes_its_own_checks(tmp_path: Path) -> None:
+    """init -> check must be a working sequence, not a starting point for editing."""
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    runner.invoke(app, ["init", str(tmp_path)])
+
+    checked = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "COMPOSE_FILE_FOUND" in checked.stdout
+    # The Docker findings depend on the machine; the point is that the profile
+    # now causes them to be attempted at all.
+    assert "DOCKER" in checked.stdout or "COMPOSE_CLI" in checked.stdout

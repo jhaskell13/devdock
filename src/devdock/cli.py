@@ -73,14 +73,19 @@ def init(
         _echo(f"Could not create project directory {root}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     profile_path = root / CONFIG_NAME
+    # A profile that ignores the project it was created in is not a starting
+    # point, it is a second thing to configure. When a Compose file is right
+    # there, say so, and declare the runtime that makes `check` and `up`
+    # actually look at it.
+    discovered = next((name for name in COMPOSE_NAMES if (root / name).is_file()), None)
     # Serialized rather than templated: a directory named "true", "1.0", or
     # "a: b" would otherwise produce a profile whose project is not a string.
     starter_profile = yaml.safe_dump(
         {
             "schema_version": 1,
             "project": root.name or "my-project",
-            "runtimes": {},
-            "compose_file": None,
+            "runtimes": {"docker": "compose"} if discovered else {},
+            "compose_file": discovered,
             "required_env": [],
         },
         sort_keys=False,
@@ -96,6 +101,11 @@ def init(
         _echo(f"Could not write profile {profile_path}: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     _echo(f"Created {profile_path}")
+    if discovered:
+        _echo(f"Found {discovered}; the profile points at it and declares the Docker runtime.")
+        _echo("Run 'devdock check' to verify the prerequisites, then 'devdock up' to start.")
+    else:
+        _echo("No Compose file was found, so the profile declares no runtime yet.")
 
 
 @app.command()
