@@ -1011,3 +1011,72 @@ def test_json_nested_too_deeply_is_refused_rather_than_raised(
     result = getattr(adapter, reader)(**arguments)
 
     assert result.error == expected
+
+
+# --- scoped starts --------------------------------------------------------
+
+
+def _start(**kwargs: object) -> list[str]:
+    runner = RecordingRunner([CommandResult(0, "", "")])
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker")
+    adapter.start(
+        project_name="devdock-sample-0123456789ab",
+        project_root=Path("/p"),
+        compose_file=Path("/p/compose.yaml"),
+        **kwargs,  # type: ignore[arg-type]
+    )
+    return runner.calls[0][0]
+
+
+def test_an_unscoped_start_names_no_services() -> None:
+    args = _start()
+
+    assert args[-3:] == ["up", "--detach", "--remove-orphans=false"]
+    assert "--" not in args and "--no-deps" not in args
+
+
+def test_a_scoped_start_puts_service_names_after_a_double_dash() -> None:
+    """Without it, Compose reads a service named "-weird" as flags.
+
+    Verified against a real Compose: it answers "unknown shorthand flag: 'e'"
+    without the separator and "no such service" with it.
+    """
+
+    args = _start(services=("db", "web"))
+
+    assert args[-3:] == ["--", "db", "web"]
+    assert args.index("--") > args.index("up")
+
+
+def test_a_scoped_start_can_be_told_not_to_pull_in_dependencies() -> None:
+    assert "--no-deps" in _start(services=("web",), no_deps=True)
+    assert "--no-deps" not in _start(services=("web",), no_deps=False)
+
+
+def test_the_parallel_limit_precedes_the_subcommand() -> None:
+    """It is one of Compose's global options, so it is invalid after `up`."""
+
+    args = _start(max_parallel=3)
+
+    assert args[:4] == ["docker", "compose", "--parallel", "3"]
+    assert args.index("--parallel") < args.index("up")
+
+
+def test_no_parallel_limit_means_no_flag() -> None:
+    assert "--parallel" not in _start()
+
+
+@pytest.mark.parametrize("name", ["bad name", "web;rm -rf /", "a" * 64, "web\nservice", ""])
+def test_a_service_name_that_is_not_argv_safe_is_refused(name: str) -> None:
+    """The separator makes a leading dash inert; this refuses the rest."""
+
+    with pytest.raises(ValueError, match="not safe"):
+        _start(services=(name,))
+
+
+def test_a_leading_dash_is_allowed_because_the_separator_makes_it_inert() -> None:
+    """Compose accepts such a name, so DevDock must not reject the project."""
+
+    args = _start(services=("-leading",))
+
+    assert args[-2:] == ["--", "-leading"]

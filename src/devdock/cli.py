@@ -261,6 +261,20 @@ def up(
         float,
         typer.Option("--deadline", min=1.0, help="Seconds the whole startup may take."),
     ] = DEFAULT_DEADLINE,
+    stage: Annotated[
+        bool,
+        typer.Option(
+            "--stage/--no-stage",
+            help="Start services a dependency layer at a time, waiting between layers. "
+            "--no-stage asks Compose to start the whole project in one call, as before.",
+        ),
+    ] = True,
+    max_parallel: Annotated[
+        int | None,
+        typer.Option(
+            "--max-parallel", min=1, help="Limit how much Compose does at once within a layer."
+        ),
+    ] = None,
     show_output: Annotated[
         bool,
         typer.Option("--show-output", help="Show the runtime's full output, still redacted."),
@@ -268,7 +282,7 @@ def up(
     timeout: Annotated[
         float,
         typer.Option(
-            "--timeout", min=1.0, help="Seconds to allow the Compose start command itself to run."
+            "--timeout", min=1.0, help="Seconds to allow one Compose start command to run."
         ),
     ] = START_TIMEOUT,
 ) -> None:
@@ -287,6 +301,8 @@ def up(
                 ready_timeout=ready_timeout,
                 deadline=deadline,
                 require_ready=require_ready,
+                stage=stage,
+                max_parallel=max_parallel,
             )
         )
 

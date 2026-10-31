@@ -1,4 +1,5 @@
 import socket
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,9 @@ class FakeAdapter:
         compose_file: Path,
         timeout: float,
         cancel: object = None,
+        services: Sequence[str] = (),
+        no_deps: bool = False,
+        max_parallel: int | None = None,
     ) -> OperationOutcome:
         self.starts.append(
             {
@@ -94,6 +98,9 @@ class FakeAdapter:
                 "project_root": project_root,
                 "compose_file": compose_file,
                 "timeout": timeout,
+                "services": tuple(services),
+                "no_deps": no_deps,
+                "max_parallel": max_parallel,
             }
         )
         return self._outcome
@@ -1395,3 +1402,240 @@ def test_a_bad_graph_is_still_caught_when_ownership_is_clean(tmp_path: Path) -> 
 
     assert result.code == "UP_DEPENDENCY_CYCLE"
     assert adapter.starts == []
+
+
+# --- staged startup --------------------------------------------------------
+
+
+def chain_adapter(scope: object, ready_from: int = 0) -> WaitAdapter:
+    """db -> web -> worker, all healthy once they appear in the inventory.
+
+    The fake only reports a container once its service has been started, so
+    the engine sees exactly what a staged start would produce.
+    """
+
+    started: list[str] = []
+    name = scope.project_name  # type: ignore[attr-defined]
+
+    class Chained(WaitAdapter):
+        def list_project_resources(self, project_name: str) -> ResourceInventory:
+            return ResourceInventory(
+                project_name,
+                containers=tuple(
+                    managed(scope, f"{name}-{service}-1", service) for service in started
+                ),
+            )
+
+        def observe_services(
+            self, *, project_name: str, project_root: Path, compose_file: Path
+        ) -> ServiceObservations:
+            self.observe_calls.append(project_name)
+            return ServiceObservations(items=tuple(healthy(scope, service) for service in started))
+
+        def start(self, **kwargs: object) -> OperationOutcome:
+            started.extend(kwargs.get("services") or ())  # type: ignore[arg-type]
+            return super().start(**kwargs)  # type: ignore[arg-type]
+
+    return Chained(
+        declared=DeclaredServices(("db", "web", "worker")),
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_healthy"),
+            DeclaredDependency("worker", "web", "service_healthy"),
+        ),
+    )
+
+
+def test_a_chain_is_started_one_layer_at_a_time(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = chain_adapter(scope)
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.ok, "\n".join(result.lines)
+    assert [call["services"] for call in adapter.starts] == [("db",), ("web",), ("worker",)]
+
+
+def test_a_staged_start_tells_compose_not_to_reorder_what_it_is_given(
+    tmp_path: Path,
+) -> None:
+    """DevDock has already satisfied the dependencies of each batch it sends."""
+
+    root = make_project(tmp_path)
+    adapter = chain_adapter(ownership_scope(profile(), root))
+
+    start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert all(call["no_deps"] is True for call in adapter.starts)
+
+
+def test_independent_services_go_out_in_one_batch(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("a", "b", "c")),
+        inventory=ResourceInventory(
+            scope.project_name,
+            containers=tuple(
+                managed(scope, f"{scope.project_name}-{s}-1", s) for s in ("a", "b", "c")
+            ),
+        ),
+        snapshots=(ServiceObservations(items=tuple(healthy(scope, s) for s in ("a", "b", "c"))),),
+    )
+
+    start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert [call["services"] for call in adapter.starts] == [("a", "b", "c")]
+
+
+def test_an_already_running_project_is_still_reconciled(tmp_path: Path) -> None:
+    """A repeat `up` must not become a no-op just because everything is ready."""
+
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web"),)),),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.ok
+    assert [call["services"] for call in adapter.starts] == [("web",)]
+
+
+def test_no_stage_starts_the_whole_project_in_one_unscoped_call(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = chain_adapter(ownership_scope(profile(), root))
+
+    start_project(
+        profile(),
+        root,
+        adapter=adapter,
+        environ={},
+        clock=TickingClock(),
+        stage=False,
+        ready_timeout=1,
+        deadline=5,
+    )
+
+    assert [call["services"] for call in adapter.starts] == [()]
+    assert adapter.starts[0]["no_deps"] is False
+
+
+def test_a_degraded_graph_leaves_the_ordering_to_compose(tmp_path: Path) -> None:
+    """Without the Compose dependencies, DevDock must not claim to know the order."""
+
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        dependency_error="Compose dependency listing failed with exit code 1.",
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web"),)),),
+    )
+
+    start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert adapter.starts[0]["no_deps"] is False, "a guessed graph must not suppress deps"
+
+
+def test_max_parallel_reaches_the_runtime(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = chain_adapter(ownership_scope(profile(), root))
+
+    start_project(
+        profile(), root, adapter=adapter, environ={}, clock=TickingClock(), max_parallel=2
+    )
+
+    assert all(call["max_parallel"] == 2 for call in adapter.starts)
+
+
+def test_a_batch_that_fails_to_start_is_reported_with_its_own_code(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        outcome=OperationOutcome("failed", 1, "", "manifest unknown"),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert not result.ok and result.code == "UP_IMAGE_NOT_FOUND"
+    assert "while starting web" in result.summary
+
+
+def test_a_later_layer_is_not_started_after_an_earlier_one_fails(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = chain_adapter(scope)
+    adapter._outcome = OperationOutcome("failed", 1, "", "no space left on device")
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.code == "UP_RESOURCE_EXHAUSTED"
+    assert [call["services"] for call in adapter.starts] == [("db",)]
+
+
+def test_max_parallel_still_reaches_the_runtime_without_staging(tmp_path: Path) -> None:
+    """A flag that is quietly ignored by one path is worse than no flag."""
+
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(declared=DeclaredServices(("web",)))
+
+    start_project(profile(), root, adapter=adapter, environ={}, wait=False, max_parallel=4)
+
+    assert adapter.starts[0]["max_parallel"] == 4
+
+
+def test_a_project_with_no_services_starts_nothing_and_says_it_is_ready(
+    tmp_path: Path,
+) -> None:
+    """Deliberate: there is nothing to start, so no Compose call is made.
+
+    A Compose file whose services are all behind inactive profiles looks like
+    this, and `docker compose up` would do nothing for it either.
+    """
+
+    root = make_project(tmp_path, compose="services: {}\n")
+    adapter = WaitAdapter(declared=DeclaredServices(()))
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.ok and result.code == "UP_READY"
+    assert adapter.starts == []
+
+
+def test_an_interrupt_between_layers_stops_the_start(tmp_path: Path) -> None:
+    """Cancelling must not let the next layer go out after the signal arrived."""
+
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    token = CancelToken()
+    adapter = chain_adapter(scope)
+
+    class CancelAfterFirst(type(adapter)):  # type: ignore[misc]
+        def start(self, **kwargs: object) -> OperationOutcome:
+            outcome = super().start(**kwargs)  # type: ignore[arg-type]
+            token.cancel()
+            return outcome
+
+    cancelling = CancelAfterFirst(
+        declared=DeclaredServices(("db", "web", "worker")),
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_healthy"),
+            DeclaredDependency("worker", "web", "service_healthy"),
+        ),
+    )
+
+    result = start_project(
+        profile(), root, adapter=cancelling, environ={}, clock=TickingClock(), cancel=token
+    )
+
+    assert result.code == "UP_INTERRUPTED"
+    assert len(cancelling.starts) == 1, "no further layer may be started after a cancel"
+    assert any("Nothing was removed" in line for line in result.lines)

@@ -212,6 +212,22 @@ This is a mitigation, not a guarantee. Compose also reads the project's `.env` f
 
 Before anything is started, the dependency graph is built and validated. Every problem it can find — a cycle, a dependency that does not exist, a condition that can never be met — would otherwise be discovered as a wait that never ends, so it is reported as a refusal instead, and nothing is mutated.
 
+### How services are started
+
+By default DevDock starts the project a dependency layer at a time: it sends `docker compose up --detach --no-deps` for the services whose dependencies are already satisfied, waits for those to meet the conditions the next ones need, and repeats. So the ordering is DevDock's, which is what makes a blocked service nameable and a timeout attributable.
+
+There is no separate notion of a layer. A service is started exactly when nothing is waiting on it, which is the same question the wait already answers. A project with no dependencies therefore goes out in a single batch, and so does a project that is already running — a repeat `up` still reconciles every service rather than becoming a no-op.
+
+Service names are passed after a `--` separator, so a service Compose considers legal but argv does not — one named `-weird`, say — is read as a name rather than as flags.
+
+`--no-deps` is only used when the dependency graph came from Compose. If the Compose file's dependencies could not be read (`GRAPH_UNAVAILABLE`), DevDock does not know the real ordering, so it starts everything in one call and leaves Compose's own ordering in charge.
+
+| Flag | Effect |
+| --- | --- |
+| `--no-stage` | Start the whole project in one `docker compose up`, as earlier versions did, and then wait. Use it if staged starting behaves differently from `docker compose up` for your project. |
+| `--max-parallel N` | Pass Compose's own `--parallel N`, bounding how much it does at once — including image pulls. |
+| `--no-wait` | No waiting, and therefore no staging: one call, Compose orders it. |
+
 ### What the wait does
 
 Each poll takes one snapshot of the project: the ownership inventory, `docker compose ps`, and every readiness probe for every running service. A service is settled when it is not blocked and every readiness source agrees. The poll interval starts at 0.25 s and backs off to 2 s, so a long wait is not thousands of queries.
@@ -221,7 +237,7 @@ Each poll takes one snapshot of the project: the ownership inventory, `docker co
 | `--ready-timeout` | 60 s | How long one service may take. **Counted from when its dependencies are satisfied**, not from when the command started, so a service deep in the graph is not charged for its ancestors' slowness. |
 | `--deadline` | 300 s | How long the whole startup may take. Overrides any remaining per-service budget. |
 | `--require-ready` | off | Treat a service with no readiness source as *not* ready. By default such a service settles as running, because there is nothing further to check. |
-| `--timeout` | 300 s | Unrelated to the above: how long the `docker compose up` command itself may run. |
+| `--timeout` | 300 s | Unrelated to the above: how long a single `docker compose up` command may run. With staged starting there is one per layer, and each gets this budget. |
 
 ### What ends a wait
 
@@ -413,6 +429,8 @@ These stop a command before anything runs. The prefix names the command.
 | `_DEPENDENCY_REGRESSED` | `UP`, `WAIT` | A service that had become ready did not stay that way. |
 | `_CONDITION_UNSATISFIABLE` | `UP`, `WAIT` | A declared condition can never be met. |
 | `_RUNTIME_UNOBSERVABLE` | `UP`, `WAIT` | The runtime stopped answering during the wait. |
+
+A layer that fails to start is reported with the failure taxonomy's own code — `UP_IMAGE_NOT_FOUND`, `UP_PULL_FAILED` and the rest — naming the services that batch was starting. Later layers are not attempted.
 | `GRAPH_UNAVAILABLE` | warning | The Compose file's dependencies could not be read, so startup order is not verified. The wait still runs. |
 
 ### Lifecycle outcomes

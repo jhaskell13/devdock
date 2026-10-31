@@ -469,3 +469,74 @@ def _plain_profile(project: Path) -> None:
         "compose_file: compose.yaml\n",
         encoding="utf-8",
     )
+
+
+# --- staged startup, against the real runtime -----------------------------
+
+
+def test_a_staged_start_produces_the_same_project_as_a_single_call(
+    project: Path, scope: OwnershipScope
+) -> None:
+    """The riskiest claim of the staged path: it changes how, not what.
+
+    Staging sends one `up` per dependency layer with --no-deps, instead of
+    one call for everything. Compose has to end up in the same place either
+    way, or DevDock has quietly changed what starting a project means.
+    """
+
+    staged = run_devdock(["up"], project)
+    assert staged.returncode == 0, staged.stdout + staged.stderr
+    by_service = {
+        item.service: item
+        for item in adapter().list_project_resources(scope.project_name).containers
+    }
+    assert set(by_service) == {"migrate", "web", "worker"}
+
+    assert run_devdock(["down", "--yes"], project).returncode == 0
+
+    single = run_devdock(["up", "--no-stage"], project)
+    assert single.returncode == 0, single.stdout + single.stderr
+    after = {
+        item.service: item
+        for item in adapter().list_project_resources(scope.project_name).containers
+    }
+
+    assert set(after) == set(by_service)
+    for service, record in after.items():
+        assert record.project == by_service[service].project
+        assert record.config_files == by_service[service].config_files
+
+
+def test_a_staged_start_respects_the_declared_order(project: Path, scope: OwnershipScope) -> None:
+    """Containers are created layer by layer, which the daemon records."""
+
+    assert run_devdock(["up"], project).returncode == 0
+
+    created = {}
+    for record in adapter().list_project_resources(scope.project_name).containers:
+        inspected = docker("inspect", "--format", "{{.Created}}", record.id, check=True)
+        created[record.service] = inspected.stdout.strip()
+
+    assert created["migrate"] < created["web"] < created["worker"], created
+
+
+def test_a_parallelism_limit_is_accepted_by_the_runtime(project: Path) -> None:
+    """`--parallel` is a global Compose option; the wrong position is a hard error."""
+
+    result = run_devdock(["up", "--max-parallel", "1"], project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UP_READY_UNVERIFIED" in result.stdout
+
+
+def test_no_deps_does_not_strand_a_service_whose_dependency_is_already_up(
+    project: Path,
+) -> None:
+    """A second `up` after a partial one must still complete the project."""
+
+    assert run_devdock(["up", "--no-wait"], project).returncode == 0
+
+    result = run_devdock(["up"], project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UP_READY_UNVERIFIED" in result.stdout

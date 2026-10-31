@@ -39,6 +39,7 @@ WaitStatus = Literal[
     "unsatisfiable",  # a declared condition can never be met
     "cancelled",  # the caller asked to stop
     "unobservable",  # the runtime stopped answering
+    "launch_failed",  # a staged start could not start one of its batches
 ]
 
 # How many consecutive passing samples a source needs before it is believed.
@@ -104,6 +105,33 @@ class Observer(Protocol):
     def __call__(self) -> Snapshot: ...
 
 
+@dataclass(frozen=True)
+class LaunchFailure:
+    """Why a batch of services could not be started.
+
+    The code and wording come from the caller, because naming a Docker
+    failure needs the failure taxonomy and this module has no business
+    knowing one exists.
+    """
+
+    code: str
+    summary: str
+    detail: tuple[str, ...] = ()
+    remedy: str | None = None
+
+
+class Launcher(Protocol):
+    """Start the named services, or explain why not.
+
+    Called with the services whose dependencies are satisfied and which have
+    not been started yet. Each service is passed exactly once over a whole
+    wait, so a project that is already running is still reconciled rather
+    than skipped.
+    """
+
+    def __call__(self, services: tuple[str, ...]) -> LaunchFailure | None: ...
+
+
 @dataclass
 class ServiceProgress:
     """What the wait has learned about one service so far."""
@@ -148,6 +176,7 @@ class WaitOutcome:
     progress: tuple[ServiceProgress, ...]
     summary: str
     detail: tuple[str, ...] = ()
+    launch_failure: LaunchFailure | None = None
 
     @property
     def ok(self) -> bool:
@@ -380,6 +409,7 @@ def wait_for_ready(
     ready_timeout: float = DEFAULT_READY_TIMEOUT,
     deadline: float = DEFAULT_DEADLINE,
     require_ready: bool = False,
+    launcher: Launcher | None = None,
 ) -> WaitOutcome:
     """Poll until every service has settled, or until something says to stop.
 
@@ -392,6 +422,7 @@ def wait_for_ready(
     ticker = RealClock() if clock is None else clock
     token = CancelToken() if cancel is None else cancel
     tracker = _Tracker()
+    launched: set[str] = set()
     started = ticker.now()
     interval = INITIAL_POLL_INTERVAL
     errors = 0
@@ -435,6 +466,39 @@ def wait_for_ready(
                 if status is not None:
                     _apply(item, status, now, require_ready)
 
+            _refresh(graph, tracker, now)
+
+            if launcher is not None:
+                batch = _ready_to_launch(graph, tracker, launched)
+                if batch:
+                    launched.update(batch)
+                    failure = launcher(batch)
+                    now = ticker.now() - started
+                    if token.cancelled:
+                        return _outcome(
+                            "cancelled",
+                            "Interrupted while starting services.",
+                            (
+                                "Some services may have been started. Nothing was removed. "
+                                "Run 'devdock status' to see what exists.",
+                            ),
+                            tracker=tracker,
+                            elapsed=now,
+                        )
+                    if failure is not None:
+                        return _outcome(
+                            "launch_failed",
+                            failure.summary,
+                            failure.detail,
+                            tracker=tracker,
+                            elapsed=now,
+                            launch_failure=failure,
+                        )
+                    # Judged on the next pass, once the runtime has been asked
+                    # what the new containers are actually doing.
+                    ticker.sleep(interval)
+                    continue
+
             settled = _evaluate(graph, tracker, now, require_ready)
             if settled is not None:
                 return _outcome(*settled, tracker=tracker, elapsed=now)
@@ -447,21 +511,13 @@ def wait_for_ready(
         interval = min(interval * 2, MAX_POLL_INTERVAL)
 
 
-def _evaluate(
-    graph: DependencyGraph, tracker: _Tracker, now: float, require_ready: bool
-) -> tuple[WaitStatus, str, tuple[str, ...]] | None:
-    """Update blocking and timers, then report a settled result or ``None``.
+def _refresh(graph: DependencyGraph, tracker: _Tracker, now: float) -> None:
+    """Recompute what each service is waiting for, and start its clock if nothing is.
 
-    Checks run in order of how much they explain. A regression or an
-    impossible condition names a cause; a failure names a service; running out
-    of time names only the symptom, so it is left to the caller's deadline
-    check after this one has found nothing better.
+    Separate from the verdict because a staged start launches between the
+    two: a service becomes unblocked here, is started because of that, and is
+    only judged on the pass after.
     """
-
-    regressions: list[str] = []
-    failures: list[str] = []
-    impossible: list[str] = []
-    unstable: list[str] = []
 
     for name in graph.nodes:
         item = tracker.for_service(name)
@@ -478,6 +534,45 @@ def _evaluate(
         # a named timeout into the global deadline with nothing to point at.
         if not item.blocked_by and item.unblocked_at is None:
             item.unblocked_at = now
+
+
+def _ready_to_launch(
+    graph: DependencyGraph, tracker: _Tracker, launched: set[str]
+) -> tuple[str, ...]:
+    """Services nothing is waiting on that have not been started yet.
+
+    This is what makes a start staged, and it needs no notion of layers: a
+    service is startable exactly when its dependencies are satisfied, which is
+    the same question the wait already answers. On a cold start that yields
+    one layer at a time. On a project that is already up it yields everything
+    at once, which is the single reconciling call `up` has always made.
+    """
+
+    return tuple(
+        name
+        for name in graph.nodes
+        if name not in launched and not tracker.for_service(name).blocked_by
+    )
+
+
+def _evaluate(
+    graph: DependencyGraph, tracker: _Tracker, now: float, require_ready: bool
+) -> tuple[WaitStatus, str, tuple[str, ...]] | None:
+    """Report a settled result, or ``None`` while there is still something to wait for.
+
+    Checks run in order of how much they explain. A regression or an
+    impossible condition names a cause; a failure names a service; running out
+    of time names only the symptom, so it is left to the caller's deadline
+    check after this one has found nothing better.
+    """
+
+    regressions: list[str] = []
+    failures: list[str] = []
+    impossible: list[str] = []
+    unstable: list[str] = []
+
+    for name in graph.nodes:
+        item = tracker.for_service(name)
 
         for edge in item.blocked_by:
             reason = condition_unsatisfiable(
@@ -655,6 +750,7 @@ def _outcome(
     *,
     tracker: _Tracker,
     elapsed: float,
+    launch_failure: LaunchFailure | None = None,
 ) -> WaitOutcome:
     return WaitOutcome(
         status=status,
@@ -662,4 +758,5 @@ def _outcome(
         progress=tuple(sorted(tracker.progress.values(), key=lambda item: item.service)),
         summary=summary,
         detail=detail,
+        launch_failure=launch_failure,
     )

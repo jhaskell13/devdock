@@ -22,7 +22,7 @@ The plan includes implementation, design, code review, tests, documentation, pac
 | 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. **Complete.** |
 | 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. **Complete.** |
 | 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. **Complete.** |
-| 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. **Complete except for staged startup and parallelism limits.** |
+| 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. **Complete.** |
 | 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
 | 5. Drift and environment snapshots | Compare declared environment with captured local state and explain meaningful changes. |
 | 6. Profiles and runtime adapter expansion | Multiple named profiles and a tested adapter boundary for additional local runtimes. |
@@ -76,12 +76,12 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 3. Readiness and dependency orchestration
 
-**Status:** Implemented and wired into the CLI. `up` waits by default, `wait` waits without starting, and the dependency graph is validated before anything is mutated. Remaining: starting one dependency layer at a time, which would let DevDock rather than Compose own the ordering, and the parallelism limit that depends on it.
+**Status:** Complete. `up` validates the dependency graph before mutating anything, starts the project one layer at a time, and waits; `wait` waits without starting. DevDock owns the ordering, so a blocked service is nameable and a timeout is attributable to the service that caused it.
 
 - [x] Model service dependencies from Compose definitions and explicit DevDock profile declarations.
 - [x] Define readiness sources: Compose health status, TCP connection, HTTP response, and bounded custom checks that do not execute arbitrary untrusted commands by default.
-- [~] Specify startup order, readiness polling interval, per-service timeout, and global deadline. Parallelism limits need the staged start below.
-- [ ] Start one dependency layer at a time so DevDock owns the ordering, with a concurrency limit per layer.
+- [x] Specify startup order, parallelism limits, readiness polling interval, per-service timeout, and global deadline.
+- [x] Start one dependency layer at a time so DevDock owns the ordering, with a concurrency limit.
 - [x] Report which dependency is blocking a service and show the last useful health result.
 - [x] Handle services with no health check and distinguish “running” from “ready”.
 - [x] Define behavior when a dependency becomes unhealthy after startup.

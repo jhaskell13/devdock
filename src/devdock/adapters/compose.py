@@ -429,32 +429,72 @@ class ComposeAdapter:
         compose_file: Path,
         timeout: float = START_TIMEOUT,
         cancel: CancelToken | None = None,
+        services: Sequence[str] = (),
+        no_deps: bool = False,
+        max_parallel: int | None = None,
     ) -> OperationOutcome:
-        """Run ``docker compose up --detach`` for exactly this project.
+        """Run ``docker compose up --detach``, optionally for named services only.
 
-        DevDock supplies the project name, project directory, and Compose file
-        itself; no user-provided Compose options are forwarded. The command
-        returns once containers are created and started, which is not the same
-        as being ready. Readiness waiting is deliberately absent here.
+        DevDock supplies the project name, project directory, Compose file,
+        and these options itself; no user-provided Compose options are
+        forwarded. The command returns once containers are created and
+        started, which is not the same as being ready: waiting is the wait
+        engine's job, not a flag passed to Compose.
+
+        ``services`` scopes the start to a batch whose dependencies the caller
+        has already satisfied, which is what makes a staged start possible.
+        ``no_deps`` then stops Compose from pulling in and re-ordering
+        dependencies the caller is already managing; it is only safe when the
+        caller's graph came from Compose in the first place, so the decision
+        is the caller's rather than implied by ``services``.
         """
 
         executable = self._locate("docker")
         if executable is None:
             return OperationOutcome("unavailable")
-        args = self._project_args(executable, project_name, project_root, compose_file)
+        names = [str(name) for name in services]
+        for name in names:
+            if not COMPOSE_SERVICE_NAME.fullmatch(name):
+                raise ValueError("service name is not safe to pass as an argument")
+        args = self._project_args(
+            executable, project_name, project_root, compose_file, max_parallel=max_parallel
+        )
         args += ["up", "--detach", "--remove-orphans=false"]
+        if no_deps:
+            args.append("--no-deps")
+        if names:
+            # Everything after "--" is a service name, never an option. Compose
+            # is Cobra-based and without it a service legitimately named
+            # "-weird" is read as flags: verified, it reports
+            # "unknown shorthand flag: 'e'". The names are validated above as
+            # well; this is the boundary where it actually matters.
+            args.append("--")
+            args.extend(names)
         return self._run_operation(args, project_root, timeout, cancel)
 
     def _project_args(
-        self, executable: str, project_name: str, project_root: Path, compose_file: Path
+        self,
+        executable: str,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        *,
+        max_parallel: int | None = None,
     ) -> list[str]:
-        """Common ``docker compose`` prefix; rejects names that are unsafe in filters."""
+        """Common ``docker compose`` prefix; rejects names that are unsafe in filters.
+
+        ``--parallel`` is one of Compose's own global options and has to
+        precede the subcommand, which is why it belongs here rather than
+        beside the ``up`` arguments.
+        """
 
         if not SAFE_PROJECT_NAME.fullmatch(project_name):
             raise ValueError(f"project name is not filter-safe: {project_name!r}")
+        parallel = [] if max_parallel is None else ["--parallel", str(int(max_parallel))]
         return [
             executable,
             "compose",
+            *parallel,
             "--project-directory",
             str(project_root),
             "--file",

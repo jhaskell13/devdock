@@ -9,11 +9,17 @@ the action proceeds.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, RuntimeAdapter
+from devdock.adapters import (
+    ComposeAdapter,
+    ContainerRecord,
+    NetworkRecord,
+    OperationOutcome,
+    RuntimeAdapter,
+)
 from devdock.adapters.compose import PROJECT_LABEL, START_TIMEOUT, STOP_TIMEOUT
 from devdock.cancellation import CancelToken
 from devdock.config import DependencyCondition, ProjectProfile
@@ -24,6 +30,7 @@ from devdock.orchestrate import (
     DEFAULT_DEADLINE,
     DEFAULT_READY_TIMEOUT,
     Clock,
+    LaunchFailure,
     Observer,
     Snapshot,
     WaitOutcome,
@@ -142,6 +149,8 @@ def start_project(
     require_ready: bool = False,
     probe: ProbeCallable = run_probe,
     clock: Clock | None = None,
+    stage: bool = True,
+    max_parallel: int | None = None,
 ) -> LifecycleResult:
     """Validate, prove ownership, start the services, then wait for them to be ready.
 
@@ -200,76 +209,64 @@ def start_project(
         return planned
     preview = assessment.explain() + planned.notes + advisories
 
-    outcome = runtime.start(
-        project_name=scope.project_name,
-        project_root=scope.root,
-        compose_file=compose_file,
-        timeout=timeout,
-        cancel=cancel,
-    )
-    captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
+    captured: list[str] = []
 
-    if outcome.status == "cancelled":
-        return _refusal(
-            "UP_INTERRUPTED",
-            "Start was interrupted at your request.",
-            preview
-            + (
-                "Compose was stopped partway through, so some containers may exist and "
-                "some may not. Nothing was removed.",
-                _inspect_hint(scope),
+    def launch(services: tuple[str, ...]) -> LaunchFailure | None:
+        """Start one batch whose dependencies the engine has already satisfied."""
+
+        outcome = runtime.start(
+            project_name=scope.project_name,
+            project_root=scope.root,
+            compose_file=compose_file,
+            timeout=timeout,
+            cancel=cancel,
+            services=services,
+            # Only when the ordering came from Compose itself. With a degraded
+            # graph DevDock does not know the real dependencies, so Compose's
+            # own ordering has to stay in charge.
+            no_deps=planned.ordered,
+            max_parallel=max_parallel,
+        )
+        captured.extend(
+            _render_output(
+                outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True
             )
-            + captured,
-            "Run 'devdock status' to see what exists, then 'devdock up' to continue or "
-            "'devdock down' to remove it.",
         )
-    if outcome.status == "unavailable":
-        return _refusal(
-            "UP_RUNTIME_UNAVAILABLE",
-            "The Docker CLI could not be started.",
-            preview,
-            "Confirm Docker is installed and on PATH, then retry.",
+        return _start_failure(outcome, scope, env, show_output, timeout, services)
+
+    staged = wait and stage
+
+    if not staged:
+        whole = runtime.start(
+            project_name=scope.project_name,
+            project_root=scope.root,
+            compose_file=compose_file,
+            timeout=timeout,
+            cancel=cancel,
+            max_parallel=max_parallel,
         )
-    if outcome.status == "timed_out":
-        return _refusal(
-            "UP_TIMED_OUT",
-            f"Start did not finish within {timeout:g} seconds and was stopped.",
-            preview
-            + ("Containers may have been created before the timeout.", _inspect_hint(scope))
-            + captured,
-            "Run 'devdock up' again with a longer --timeout, or inspect the project with the "
-            "docker ps command above.",
+        failure = _start_failure(whole, scope, env, show_output, timeout)
+        if failure is not None:
+            return _refusal(
+                failure.code, failure.summary, preview + failure.detail, failure.remedy or ""
+            )
+        started = preview + _render_output(
+            whole.raw_stdout, whole.raw_stderr, env, show_output, on_success=True
         )
-    if outcome.status == "failed":
-        failure = classify_failure("UP", outcome.raw_stdout, outcome.raw_stderr)
-        return _refusal(
-            failure.code,
-            f"Could not start {scope.project_name}: {failure.summary}",
-            preview
-            + _failure_lines(failure, outcome.returncode)
-            + _render_output(
-                outcome.raw_stdout,
-                outcome.raw_stderr,
-                env,
-                show_output,
-                recognized=failure.recognized,
-            ),
-            failure.remedy,
-        )
-    started = preview + _render_output(
-        outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True
-    )
-    if not wait:
-        return LifecycleResult(
-            "UP_STARTED",
-            True,
-            f"Started {scope.project_name}.",
-            started
-            + (
-                "Services were started but readiness was not verified; a container can be "
-                "running without being ready to serve requests. Drop --no-wait to verify.",
-            ),
-        )
+        if not wait:
+            return LifecycleResult(
+                "UP_STARTED",
+                True,
+                f"Started {scope.project_name}.",
+                started
+                + (
+                    "Services were started but readiness was not verified; a container can "
+                    "be running without being ready to serve requests. Drop --no-wait to "
+                    "verify.",
+                ),
+            )
+    else:
+        started = preview
 
     waited = wait_for_ready(
         planned.graph,
@@ -279,10 +276,17 @@ def start_project(
         ready_timeout=ready_timeout,
         deadline=deadline,
         require_ready=require_ready,
+        launcher=launch if staged else None,
     )
-    return _wait_result(
-        waited, "UP", lead=started + (planned.graph.explain() if planned.graph.nodes else ())
-    )
+    lead = started + (planned.graph.explain() if planned.graph.nodes else ()) + tuple(captured)
+    if waited.launch_failure is not None:
+        return _refusal(
+            waited.launch_failure.code,
+            waited.launch_failure.summary,
+            lead + waited.launch_failure.detail,
+            waited.launch_failure.remedy or "",
+        )
+    return _wait_result(waited, "UP", lead=lead)
 
 
 def _render_output(
@@ -695,6 +699,12 @@ class ProjectGraph:
     graph: DependencyGraph
     declared: tuple[str, ...]
     notes: tuple[str, ...] = ()
+    ordered: bool = True
+    """Whether the Compose file's own dependencies were read.
+
+    False when the listing failed, which means the graph holds only what the
+    profile declared and Compose's ordering is the one still to be trusted.
+    """
 
 
 def project_graph(
@@ -722,6 +732,7 @@ def project_graph(
     dependencies = runtime.list_dependencies(project_root=scope.root, compose_file=compose_file)
     notes: list[str] = []
     compose_edges: dict[str, dict[str, DependencyCondition]] = {}
+    ordered = True
     without_healthcheck: frozenset[str] = frozenset()
     optional_edges: frozenset[tuple[str, str]] = frozenset()
 
@@ -737,8 +748,10 @@ def project_graph(
         # started and waited for, just without knowing what waits for what.
         notes.append(
             f"[WARN] GRAPH_UNAVAILABLE: {dependencies.error} Dependencies declared in the "
-            "Compose file were not read, so startup order is not verified."
+            "Compose file were not read, so startup order is not verified and Compose is "
+            "left to order the start itself."
         )
+        ordered = False
     else:
         without_healthcheck = dependencies.healthcheck_disabled
         optional_edges = frozenset(
@@ -765,7 +778,70 @@ def project_graph(
             built.explain(),
             _GRAPH_PROBLEM_REMEDIES[kind],
         )
-    return ProjectGraph(built, declared.names, tuple(notes))
+    return ProjectGraph(built, declared.names, tuple(notes), ordered=ordered)
+
+
+def _start_failure(
+    outcome: OperationOutcome,
+    scope: OwnershipScope,
+    environ: Mapping[str, str],
+    show_output: bool,
+    timeout: float,
+    services: Sequence[str] = (),
+) -> LaunchFailure | None:
+    """Name what went wrong with one start, or ``None`` if nothing did.
+
+    Shared by the single call and each batch of a staged start, so a failure
+    reads the same whichever way the project was started.
+    """
+
+    if outcome.succeeded:
+        return None
+    scoped = f" while starting {', '.join(services)}" if services else ""
+    captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, environ, show_output)
+    if outcome.status == "cancelled":
+        return LaunchFailure(
+            "UP_INTERRUPTED",
+            f"Start was interrupted at your request{scoped}.",
+            (
+                "Compose was stopped partway through, so some containers may exist and "
+                "some may not. Nothing was removed.",
+                _inspect_hint(scope),
+            )
+            + captured,
+            "Run 'devdock status' to see what exists, then 'devdock up' to continue or "
+            "'devdock down' to remove it.",
+        )
+    if outcome.status == "unavailable":
+        return LaunchFailure(
+            "UP_RUNTIME_UNAVAILABLE",
+            "The Docker CLI could not be started.",
+            (),
+            "Confirm Docker is installed and on PATH, then retry.",
+        )
+    if outcome.status == "timed_out":
+        return LaunchFailure(
+            "UP_TIMED_OUT",
+            f"Start did not finish within {timeout:g} seconds{scoped} and was stopped.",
+            ("Containers may have been created before the timeout.", _inspect_hint(scope))
+            + captured,
+            "Run 'devdock up' again with a longer --timeout, or inspect the project with "
+            "the docker ps command above.",
+        )
+    failure = classify_failure("UP", outcome.raw_stdout, outcome.raw_stderr)
+    return LaunchFailure(
+        failure.code,
+        f"Could not start {scope.project_name}{scoped}: {failure.summary}",
+        _failure_lines(failure, outcome.returncode)
+        + _render_output(
+            outcome.raw_stdout,
+            outcome.raw_stderr,
+            environ,
+            show_output,
+            recognized=failure.recognized,
+        ),
+        failure.remedy,
+    )
 
 
 def _project_observer(

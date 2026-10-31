@@ -282,8 +282,15 @@ class RuntimeAdapter(Protocol):
         compose_file: Path,
         timeout: float,
         cancel: CancelToken | None = None,
+        services: Sequence[str] = (),
+        no_deps: bool = False,
+        max_parallel: int | None = None,
     ) -> OperationOutcome:
-        """Start the project's services detached, without waiting for readiness."""
+        """Start the project's services detached, without waiting for readiness.
+
+        ``services`` limits the start to those names; empty means the whole
+        project.
+        """
         ...
 
     def stop(
