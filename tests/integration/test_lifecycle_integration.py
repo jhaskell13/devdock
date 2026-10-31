@@ -82,8 +82,8 @@ def test_ownership_labels_match_what_devdock_expects(project: Path, scope: Owner
     assessment = assess_ownership(scope, inventory)
 
     assert assessment.safe_to_act, "\n".join(assessment.explain())
-    assert len(assessment.managed) == 2
-    assert {item.service for item in assessment.managed} == {"web", "worker"}
+    assert len(assessment.managed) == 3
+    assert {item.service for item in assessment.managed} == {"migrate", "web", "worker"}
     for record in assessment.managed:
         assert record.project == scope.project_name
         assert Path(record.working_dir) == scope.root
@@ -116,7 +116,7 @@ def test_repeated_up_and_down_are_idempotent(project: Path, scope: OwnershipScop
     start(project)
     second = {item.id for item in adapter().list_project_resources(scope.project_name).containers}
 
-    assert first == second and len(first) == 2
+    assert first == second and len(first) == 3
 
     assert stop(project) == "DOWN_STOPPED"
     assert stop(project) == "DOWN_NOTHING_TO_STOP"
@@ -290,3 +290,127 @@ def test_check_passes_against_a_real_daemon(project: Path) -> None:
     assert "COMPOSE_CLI_AVAILABLE" in result.stdout
     assert "DOCKER_DAEMON_AVAILABLE" in result.stdout
     assert "COMPOSE_CONFIG_VALID" in result.stdout
+
+
+# --- waiting, against the real runtime -----------------------------------
+
+
+def test_up_waits_and_reports_what_proved_each_service_ready(project: Path) -> None:
+    """The whole milestone in one command, against a real daemon.
+
+    The demo project is built so this exercises every readiness class at
+    once: a one-shot task that exits cleanly, a service verified by both a
+    Compose health check and an HTTP probe against its published port, and one
+    with nothing to verify it.
+    """
+
+    result = run_devdock(["up"], project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    text = result.stdout
+
+    assert "UP_READY" in text
+    assert "Startup order" in text
+    assert "web depends on migrate (service_completed_successfully" in text
+    assert "worker depends on web (service_healthy" in text
+    assert "[PASS] compose health reports healthy" in text
+    assert "[PASS] http GET 127.0.0.1:" in text
+    assert "migrate: exited_ok" in text
+
+
+def test_a_second_up_is_already_ready(project: Path) -> None:
+    assert run_devdock(["up"], project).returncode == 0
+
+    result = run_devdock(["up"], project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UP_READY" in result.stdout
+
+
+def test_wait_reports_ready_without_starting_anything(project: Path, scope: OwnershipScope) -> None:
+    assert run_devdock(["up"], project).returncode == 0
+    before = {item.id for item in adapter().list_project_resources(scope.project_name).containers}
+
+    result = run_devdock(["wait"], project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WAIT_READY" in result.stdout
+    after = {item.id for item in adapter().list_project_resources(scope.project_name).containers}
+    assert before == after, "wait must not create or replace anything"
+
+
+def test_wait_times_out_on_a_project_that_was_never_started(project: Path) -> None:
+    """Nothing exists, so every service is missing and its own budget runs out."""
+
+    result = run_devdock(["wait", "--ready-timeout", "3", "--deadline", "40"], project)
+
+    assert result.returncode == 1
+    assert "WAIT_READINESS_TIMEOUT" in result.stderr
+
+
+def test_no_wait_returns_before_the_services_are_ready(project: Path) -> None:
+    result = run_devdock(["up", "--no-wait"], project)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UP_STARTED" in result.stdout
+    assert "readiness was not verified" in result.stdout
+
+
+def test_a_cycle_that_only_exists_after_merging_is_refused_before_anything_starts(
+    project: Path, scope: OwnershipScope
+) -> None:
+    """The case only DevDock can catch, and the gate runs before any mutation.
+
+    A cycle written entirely inside the Compose file is rejected by Compose
+    itself, with its own message. A cycle that appears only once the profile's
+    dependencies are merged with the Compose file's is invisible to both
+    sources on their own -- neither is cyclic -- and is what the merged graph
+    is for.
+    """
+
+    (project / "compose.yaml").write_text(
+        "services:\n"
+        "  a:\n"
+        "    image: busybox:stable\n"
+        '    command: ["sh", "-c", "sleep 60"]\n'
+        "    depends_on: [b]\n"
+        "  b:\n"
+        "    image: busybox:stable\n"
+        '    command: ["sh", "-c", "sleep 60"]\n',
+        encoding="utf-8",
+    )
+    (project / CONFIG_NAME).write_text(
+        "schema_version: 1\n"
+        "project: devdock-demo\n"
+        "compose_file: compose.yaml\n"
+        "services:\n"
+        "  b:\n"
+        "    depends_on:\n"
+        "      a: service_started\n",
+        encoding="utf-8",
+    )
+
+    result = run_devdock(["up"], project)
+
+    assert result.returncode == 1
+    assert "UP_DEPENDENCY_CYCLE" in result.stderr, result.stderr
+    assert "a depends on b depends on a" in result.stderr or (
+        "b depends on a depends on b" in result.stderr
+    )
+    inventory = adapter().list_project_resources(scope.project_name)
+    assert inventory.containers == (), "nothing may be created when the graph is refused"
+
+
+def test_a_cycle_inside_the_compose_file_is_reported_by_compose(project: Path) -> None:
+    """Compose rejects it when the services are listed, before DevDock's graph."""
+
+    (project / "compose.yaml").write_text(
+        "services:\n"
+        '  a: {image: busybox:stable, command: ["true"], depends_on: [b]}\n'
+        '  b: {image: busybox:stable, command: ["true"], depends_on: [a]}\n',
+        encoding="utf-8",
+    )
+
+    result = run_devdock(["up"], project)
+
+    assert result.returncode == 1
+    assert "UP_CONFIG_UNREADABLE" in result.stderr, result.stderr

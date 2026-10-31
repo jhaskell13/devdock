@@ -22,8 +22,10 @@ from devdock.lifecycle import (
     plan_stop,
     project_status,
     start_project,
+    wait_for_project,
 )
 from devdock.metadata import read_python_metadata
+from devdock.orchestrate import DEFAULT_DEADLINE, DEFAULT_READY_TIMEOUT
 from devdock.ownership import ownership_scope
 from devdock.redaction import sanitize
 
@@ -231,21 +233,97 @@ def _render(result: LifecycleResult) -> None:
 @app.command()
 def up(
     directory: Annotated[Path, typer.Argument(help="Project directory to start.")] = Path("."),
+    wait: Annotated[
+        bool,
+        typer.Option(
+            "--wait/--no-wait",
+            help="Wait for services to become ready before reporting success.",
+        ),
+    ] = True,
+    require_ready: Annotated[
+        bool,
+        typer.Option(
+            "--require-ready",
+            help="Treat a service with no readiness source as not ready, rather than accepting "
+            "that it is running.",
+        ),
+    ] = False,
+    ready_timeout: Annotated[
+        float,
+        typer.Option(
+            "--ready-timeout",
+            min=1.0,
+            help="Seconds a single service may take to become ready, counted from when its "
+            "dependencies are satisfied.",
+        ),
+    ] = DEFAULT_READY_TIMEOUT,
+    deadline: Annotated[
+        float,
+        typer.Option("--deadline", min=1.0, help="Seconds the whole startup may take."),
+    ] = DEFAULT_DEADLINE,
     show_output: Annotated[
         bool,
         typer.Option("--show-output", help="Show the runtime's full output, still redacted."),
     ] = False,
     timeout: Annotated[
         float,
-        typer.Option("--timeout", min=1.0, help="Seconds to allow the start to run."),
+        typer.Option(
+            "--timeout", min=1.0, help="Seconds to allow the Compose start command itself to run."
+        ),
     ] = START_TIMEOUT,
 ) -> None:
-    """Start the project's Compose services detached, without waiting for readiness."""
+    """Start the project's Compose services and wait for them to become ready."""
 
     root, profile = _load_project(directory)
     with interruptible() as cancel:
         _render(
-            start_project(profile, root, timeout=timeout, show_output=show_output, cancel=cancel)
+            start_project(
+                profile,
+                root,
+                timeout=timeout,
+                show_output=show_output,
+                cancel=cancel,
+                wait=wait,
+                ready_timeout=ready_timeout,
+                deadline=deadline,
+                require_ready=require_ready,
+            )
+        )
+
+
+@app.command(name="wait")
+def wait_command(
+    directory: Annotated[Path, typer.Argument(help="Project directory to wait for.")] = Path("."),
+    require_ready: Annotated[
+        bool,
+        typer.Option(
+            "--require-ready",
+            help="Treat a service with no readiness source as not ready, rather than accepting "
+            "that it is running.",
+        ),
+    ] = False,
+    ready_timeout: Annotated[
+        float,
+        typer.Option("--ready-timeout", min=1.0, help="Seconds a single service may take."),
+    ] = DEFAULT_READY_TIMEOUT,
+    deadline: Annotated[
+        float,
+        typer.Option("--deadline", min=1.0, help="Seconds the whole wait may take."),
+    ] = DEFAULT_DEADLINE,
+) -> None:
+    """Wait for an already-started project to become ready. Starts nothing."""
+
+    root, profile = _load_project(directory)
+    with interruptible() as cancel:
+        _render(
+            wait_for_project(
+                profile,
+                root,
+                cancel=cancel,
+                ready_timeout=ready_timeout,
+                deadline=deadline,
+                require_ready=require_ready,
+            )
         )
 
 

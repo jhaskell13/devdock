@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -94,26 +93,6 @@ def project_name(root: Path) -> str:
     raise Stop("Could not read the Compose project name from 'devdock inspect'.")
 
 
-def wait_for_ready(root: Path, seconds: int = 60) -> None:
-    """Poll status until the health-checked service reports ready."""
-
-    print(f"\n(waiting up to {seconds}s for the web service's health check to pass)")
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        result = subprocess.run(
-            [sys.executable, "-m", "devdock", "status", str(root)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if any(
-            line.startswith("web ") and " ready " in line for line in result.stdout.splitlines()
-        ):
-            return
-        time.sleep(2)
-    print("(the health check did not pass in time; continuing anyway)")
-
-
 def walkthrough(root: Path, keep: bool) -> str:
     heading("1. Discover the project and the resources DevDock will own")
     name = project_name(root)
@@ -127,18 +106,25 @@ def walkthrough(root: Path, keep: bool) -> str:
     devdock("status", str(root))
     print("\n-> Every declared service is 'missing': declared, but no container exists.")
 
-    heading("4. Start the services")
+    heading("4. Start the services and wait for them to be ready")
     devdock("up", str(root))
-    print("\n-> Note the ownership scope printed before the action, and the reminder")
-    print("   that services were started but readiness was NOT verified.")
-
-    wait_for_ready(root)
+    print("\n-> The ownership scope is printed before anything is touched, then the")
+    print("   startup order DevDock derived from the Compose file's depends_on.")
+    print("   'up' waits by default and reports what proved each service ready:")
+    print("   'migrate' exited cleanly, 'web' passed both its health check and the")
+    print("   HTTP probe declared in devdock.yaml, and 'worker' is running with")
+    print("   nothing to verify it, which DevDock says rather than calling it ready.")
 
     heading("5. Status once running")
     devdock("status", str(root))
-    print("\n-> 'web' is ready (its health check passes).")
-    print("   'worker' is 'running (readiness unverified)' because it declares no health check.")
-    print("   DevDock never claims a service is ready when it cannot prove it.")
+    print("\n-> The same readiness sources, reported per service.")
+    print("   'worker' is 'running (readiness unverified)': DevDock never claims a")
+    print("   service is ready when it cannot prove it.")
+
+    heading("5b. Wait again: it is already ready, so it returns at once")
+    devdock("wait", str(root))
+    print("\n-> 'devdock wait' starts nothing. It is what to run after an interrupt,")
+    print("   from a second terminal, or in a script that started the project itself.")
 
     heading("6. Start again: idempotent")
     devdock("up", str(root))

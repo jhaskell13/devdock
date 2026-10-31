@@ -9,7 +9,8 @@ Typer commands
   ├─ init      writes a starter profile
   ├─ inspect   discovers the project root and reports known files
   ├─ check     loads the profile, validates it, and runs diagnostics
-  ├─ up        gates on checks and ownership, then starts services detached
+  ├─ up        gates on checks, ownership and the dependency graph, starts, then waits
+  ├─ wait      waits for an already-started project; starts and changes nothing
   ├─ status    joins declared services, owned containers, and runtime state
   └─ down      plans, confirms, stops containers and networks, verifies; never volumes
 
@@ -29,6 +30,8 @@ Runtime adapter (adapters/)
 
 Lifecycle (lifecycle.py)
   ├─ policy only: every gate runs before the adapter is asked to mutate
+  ├─ builds and validates the dependency graph before a start, not after
+  ├─ bridges adapter + status + probes into the Observer the wait engine polls
   ├─ down is split into plan_stop (preview) and execute_stop (re-check, act, verify)
   └─ returns redacted display lines and a stable code
 

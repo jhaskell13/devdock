@@ -24,7 +24,10 @@ CODE_PREFIXES = (
     "UP",
     "STATUS",
     "DOWN",
+    "WAIT",
+    "GRAPH",
 )
+LIFECYCLE_PREFIXES = ("UP", "STATUS", "DOWN", "WAIT")
 LITERAL = re.compile(r"\b((?:" + "|".join(CODE_PREFIXES) + r")_[A-Z][A-Z_]+)\b")
 GATE_SUFFIX = re.compile(r"^_[A-Z][A-Z_]+$")
 # Upper-case identifiers in source that are environment variables, not codes.
@@ -67,7 +70,7 @@ def emitted_codes() -> set[str]:
             codes.update(LITERAL.findall(text))
             if GATE_SUFFIX.fullmatch(text):
                 suffixes.add(text)
-    for prefix in ("UP", "STATUS", "DOWN"):
+    for prefix in LIFECYCLE_PREFIXES:
         codes.update(f"{prefix}{suffix}" for suffix in suffixes)
     for prefix in ("UP", "DOWN"):
         codes.update(f"{prefix}_{suffix}" for suffix in _SUFFIX.values())
@@ -78,7 +81,7 @@ def documented(code: str) -> bool:
     if f"`{code}`" in CLI_DOC:
         return True
     prefix, _, suffix = code.partition("_")
-    if prefix in {"UP", "STATUS", "DOWN"} and f"`_{suffix}`" in CLI_DOC:
+    if prefix in LIFECYCLE_PREFIXES and f"`_{suffix}`" in CLI_DOC:
         return True
     if code.startswith("REQUIRED_"):
         return f"`{code}`" in CLI_DOC

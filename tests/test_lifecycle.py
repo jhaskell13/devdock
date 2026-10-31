@@ -6,6 +6,8 @@ import pytest
 from devdock.adapters import (
     ComposeCapabilities,
     ContainerRecord,
+    DeclaredDependencies,
+    DeclaredDependency,
     DeclaredServices,
     NetworkRecord,
     OperationOutcome,
@@ -14,6 +16,7 @@ from devdock.adapters import (
     ServiceObservation,
     ServiceObservations,
 )
+from devdock.cancellation import CancelToken
 from devdock.config import ProjectProfile
 from devdock.lifecycle import (
     LifecycleResult,
@@ -22,6 +25,7 @@ from devdock.lifecycle import (
     plan_stop,
     project_status,
     start_project,
+    wait_for_project,
 )
 from devdock.ownership import derive_project_name, ownership_scope
 from devdock.probes import ProbeResult
@@ -40,10 +44,12 @@ class FakeAdapter:
         capabilities: ComposeCapabilities = READY,
         inventory: ResourceInventory | None = None,
         outcome: OperationOutcome | None = None,
+        dependencies: DeclaredDependencies | None = None,
     ) -> None:
         self._capabilities = capabilities
         self._inventory = inventory
         self._outcome = outcome or OperationOutcome("succeeded", 0, "Container web Started", "")
+        self._dependencies = dependencies
         self.starts: list[dict[str, object]] = []
 
     def detect_capabilities(self) -> ComposeCapabilities:
@@ -56,6 +62,22 @@ class FakeAdapter:
 
     def list_project_resources(self, project_name: str) -> ResourceInventory:
         return self._inventory or ResourceInventory(project_name)
+
+    def list_declared_services(self, *, project_root: Path, compose_file: Path) -> DeclaredServices:
+        return DeclaredServices(names=self._declared_names())
+
+    def list_dependencies(self, *, project_root: Path, compose_file: Path) -> DeclaredDependencies:
+        return self._dependencies or DeclaredDependencies(services=self._declared_names())
+
+    def _declared_names(self) -> tuple[str, ...]:
+        if self._dependencies is not None and self._dependencies.services:
+            return self._dependencies.services
+        return ("web",)
+
+    def observe_services(
+        self, *, project_name: str, project_root: Path, compose_file: Path
+    ) -> ServiceObservations:
+        return ServiceObservations()
 
     def start(
         self,
@@ -77,6 +99,18 @@ class FakeAdapter:
         return self._outcome
 
 
+def start(*args: object, **kwargs: object) -> LifecycleResult:
+    """``start_project`` with waiting off.
+
+    Every test written before waiting existed is about the start itself: what
+    is passed to the adapter, what is refused, how output is rendered. Waiting
+    is exercised separately, against an injected clock.
+    """
+
+    kwargs.setdefault("wait", False)
+    return start_project(*args, **kwargs)  # type: ignore[arg-type]
+
+
 def make_project(tmp_path: Path, compose: str = "services:\n  web:\n    image: x\n") -> Path:
     (tmp_path / "compose.yaml").write_text(compose, encoding="utf-8")
     return tmp_path
@@ -95,7 +129,7 @@ def test_successful_start_passes_the_derived_scope_to_the_adapter(tmp_path: Path
     root = make_project(tmp_path)
     adapter = FakeAdapter()
 
-    result = start_project(profile(), root, adapter=adapter, environ={}, timeout=42)
+    result = start(profile(), root, adapter=adapter, environ={}, timeout=42)
 
     assert result.ok and result.code == "UP_STARTED"
     call = adapter.starts[0]
@@ -106,7 +140,7 @@ def test_successful_start_passes_the_derived_scope_to_the_adapter(tmp_path: Path
 
 
 def test_success_states_that_readiness_was_not_verified(tmp_path: Path) -> None:
-    result = start_project(profile(), make_project(tmp_path), adapter=FakeAdapter(), environ={})
+    result = start(profile(), make_project(tmp_path), adapter=FakeAdapter(), environ={})
 
     assert any("readiness was not verified" in line for line in result.lines)
 
@@ -114,7 +148,7 @@ def test_success_states_that_readiness_was_not_verified(tmp_path: Path) -> None:
 def test_ownership_preview_is_printed_before_acting(tmp_path: Path) -> None:
     root = make_project(tmp_path)
 
-    result = start_project(profile(), root, adapter=FakeAdapter(), environ={})
+    result = start(profile(), root, adapter=FakeAdapter(), environ={})
 
     text = "\n".join(result.lines)
     assert f"Compose project name: {derive_project_name('sample', root)}" in text
@@ -138,8 +172,8 @@ def test_repeated_start_is_idempotent_when_resources_are_already_ours(
     )
     adapter = FakeAdapter(inventory=ResourceInventory(scope.project_name, containers=(running,)))
 
-    first = start_project(profile(), root, adapter=adapter, environ={})
-    second = start_project(profile(), root, adapter=adapter, environ={})
+    first = start(profile(), root, adapter=adapter, environ={})
+    second = start(profile(), root, adapter=adapter, environ={})
 
     assert first.ok and second.ok
     assert len(adapter.starts) == 2
@@ -153,9 +187,7 @@ def test_preflight_failure_blocks_the_start(tmp_path: Path) -> None:
     root = make_project(tmp_path)
     adapter = FakeAdapter()
 
-    result = start_project(
-        profile(required_env=["ABSENT_VARIABLE"]), root, adapter=adapter, environ={}
-    )
+    result = start(profile(required_env=["ABSENT_VARIABLE"]), root, adapter=adapter, environ={})
 
     assert not result.ok and result.code == "UP_PREFLIGHT_FAILED"
     assert adapter.starts == []
@@ -165,7 +197,7 @@ def test_preflight_failure_blocks_the_start(tmp_path: Path) -> None:
 def test_missing_compose_file_blocks_the_start(tmp_path: Path) -> None:
     adapter = FakeAdapter()
 
-    result = start_project(profile(), tmp_path, adapter=adapter, environ={})
+    result = start(profile(), tmp_path, adapter=adapter, environ={})
 
     assert result.code == "UP_COMPOSE_FILE_MISSING"
     assert adapter.starts == []
@@ -187,7 +219,7 @@ def test_compose_file_escaping_the_project_blocks_the_start(
 
     monkeypatch.setattr(Path, "resolve", escape)
 
-    result = start_project(profile(), root, adapter=adapter, environ={})
+    result = start(profile(), root, adapter=adapter, environ={})
 
     # Preflight diagnostics catch this first; the dedicated gate remains as defense in depth.
     assert result.code == "UP_PREFLIGHT_FAILED"
@@ -210,7 +242,7 @@ def test_runtime_problems_block_the_start(
 ) -> None:
     adapter = FakeAdapter(capabilities=capabilities)
 
-    result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
+    result = start(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
     assert result.code == expected
     assert adapter.starts == []
@@ -222,7 +254,7 @@ def test_ownership_conflict_blocks_the_start_and_explains_why(tmp_path: Path) ->
     intruder = ContainerRecord(id="x1", name=f"{scope.project_name}-web-1", state="running")
     adapter = FakeAdapter(inventory=ResourceInventory(scope.project_name, containers=(intruder,)))
 
-    result = start_project(profile(), root, adapter=adapter, environ={})
+    result = start(profile(), root, adapter=adapter, environ={})
 
     assert result.code == "UP_OWNERSHIP_CONFLICT"
     assert adapter.starts == []
@@ -236,7 +268,7 @@ def test_incomplete_inventory_blocks_the_start(tmp_path: Path) -> None:
         inventory=ResourceInventory(scope.project_name, errors=("Network query failed.",))
     )
 
-    result = start_project(profile(), root, adapter=adapter, environ={})
+    result = start(profile(), root, adapter=adapter, environ={})
 
     assert result.code == "UP_OWNERSHIP_CONFLICT"
     assert adapter.starts == []
@@ -250,7 +282,7 @@ def test_failed_start_summarizes_stderr_and_redacts_it(tmp_path: Path) -> None:
         outcome=OperationOutcome("failed", 1, "", "bind failed for hunter2-very-secret")
     )
 
-    result = start_project(
+    result = start(
         profile(),
         make_project(tmp_path),
         adapter=adapter,
@@ -267,9 +299,7 @@ def test_failed_start_summarizes_stderr_and_redacts_it(tmp_path: Path) -> None:
 def test_timeout_warns_that_containers_may_exist(tmp_path: Path) -> None:
     adapter = FakeAdapter(outcome=OperationOutcome("timed_out", None, "pulling", ""))
 
-    result = start_project(
-        profile(), make_project(tmp_path), adapter=adapter, environ={}, timeout=5
-    )
+    result = start(profile(), make_project(tmp_path), adapter=adapter, environ={}, timeout=5)
 
     assert result.code == "UP_TIMED_OUT"
     assert "5 seconds" in result.summary
@@ -279,7 +309,7 @@ def test_timeout_warns_that_containers_may_exist(tmp_path: Path) -> None:
 def test_unavailable_runtime_during_start_is_reported(tmp_path: Path) -> None:
     adapter = FakeAdapter(outcome=OperationOutcome("unavailable"))
 
-    result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
+    result = start(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
     assert result.code == "UP_RUNTIME_UNAVAILABLE"
 
@@ -291,7 +321,7 @@ def test_default_output_is_a_bounded_tail(tmp_path: Path) -> None:
     noisy = "\n".join(f"line {index}" for index in range(60))
     adapter = FakeAdapter(outcome=OperationOutcome("failed", 1, "", noisy))
 
-    result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
+    result = start(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
     assert any("earlier line(s) hidden" in line for line in result.lines)
     assert not any("Runtime stdout:" in line for line in result.lines)
@@ -302,7 +332,7 @@ def test_show_output_includes_both_streams_and_still_redacts(tmp_path: Path) -> 
         outcome=OperationOutcome("succeeded", 0, "pulled image-layer-token", "warning text")
     )
 
-    result = start_project(
+    result = start(
         profile(),
         make_project(tmp_path),
         adapter=adapter,
@@ -319,7 +349,7 @@ def test_show_output_includes_both_streams_and_still_redacts(tmp_path: Path) -> 
 def test_show_output_cannot_be_used_to_disable_redaction(tmp_path: Path) -> None:
     adapter = FakeAdapter(outcome=OperationOutcome("failed", 1, "", "secret-value-here"))
 
-    shown = start_project(
+    shown = start(
         profile(),
         make_project(tmp_path),
         adapter=adapter,
@@ -772,7 +802,7 @@ def test_declared_port_already_in_use_does_not_block_a_repeat_start(tmp_path: Pa
         held.bind(("127.0.0.1", 0))
         held.listen()
         port = held.getsockname()[1]
-        result = start_project(profile(ports=[port]), root, adapter=adapter, environ={})
+        result = start(profile(ports=[port]), root, adapter=adapter, environ={})
 
     assert result.ok and result.code == "UP_STARTED"
     assert len(adapter.starts) == 1
@@ -782,7 +812,7 @@ def test_declared_port_already_in_use_does_not_block_a_repeat_start(tmp_path: Pa
 def test_other_preflight_failures_still_block_a_start(tmp_path: Path) -> None:
     adapter = FakeAdapter()
 
-    result = start_project(
+    result = start(
         profile(required_env=["ABSENT_VARIABLE"]),
         make_project(tmp_path),
         adapter=adapter,
@@ -805,7 +835,7 @@ DENIED = ComposeCapabilities(
 def test_up_refuses_with_a_permission_code_and_runs_nothing(tmp_path: Path) -> None:
     adapter = FakeAdapter(capabilities=DENIED)
 
-    result = start_project(profile(), make_project(tmp_path), adapter=adapter, environ={})
+    result = start(profile(), make_project(tmp_path), adapter=adapter, environ={})
 
     assert result.code == "UP_PERMISSION_DENIED" and adapter.starts == []
     assert "docker" in (result.remedy or "").lower()
@@ -826,8 +856,8 @@ def test_successful_start_hides_runtime_output_unless_requested(tmp_path: Path) 
     root = make_project(tmp_path)
     noisy = OperationOutcome("succeeded", 0, "", "Container web Created\nContainer web Started")
 
-    quiet = start_project(profile(), root, adapter=FakeAdapter(outcome=noisy), environ={})
-    verbose = start_project(
+    quiet = start(profile(), root, adapter=FakeAdapter(outcome=noisy), environ={})
+    verbose = start(
         profile(), root, adapter=FakeAdapter(outcome=noisy), environ={}, show_output=True
     )
 
@@ -855,7 +885,7 @@ def test_advisory_findings_are_not_labelled_as_failures(tmp_path: Path) -> None:
     with socket.socket() as held:
         held.bind(("127.0.0.1", 0))
         held.listen()
-        result = start_project(
+        result = start(
             profile(ports=[held.getsockname()[1]]),
             root,
             adapter=FakeAdapter(),
@@ -962,7 +992,7 @@ def test_timeout_evidence_includes_the_inspect_command_it_refers_to(tmp_path: Pa
     root = make_project(tmp_path)
     adapter = FakeAdapter(outcome=OperationOutcome("timed_out"))
 
-    result = start_project(profile(), root, adapter=adapter, environ={}, timeout=3)
+    result = start(profile(), root, adapter=adapter, environ={}, timeout=3)
 
     text = "\n".join(result.lines)
     assert "docker ps command above" in (result.remedy or "")
@@ -977,7 +1007,7 @@ def test_all_three_commands_share_identical_gate_wording(tmp_path: Path) -> None
         compose_cli_returncode=0,
         daemon="permission_denied",
     )
-    up = start_project(profile(), root, adapter=FakeAdapter(capabilities=denied), environ={})
+    up = start(profile(), root, adapter=FakeAdapter(capabilities=denied), environ={})
     status = project_status(profile(), root, adapter=StatusAdapter(capabilities=denied))
     down = plan_stop(profile(), root, adapter=StopAdapter(capabilities=denied))
     assert isinstance(down, LifecycleResult)
@@ -1040,3 +1070,288 @@ def test_status_does_not_probe_a_service_the_profile_does_not_declare(tmp_path: 
         raise AssertionError("no probe should run for an undeclared service")
 
     assert project_status(profile(), root, adapter=adapter, probe=refuse).ok
+
+
+# --- the graph gate and waiting -------------------------------------------
+
+
+class WaitAdapter(StatusAdapter):
+    """A status adapter that also answers the dependency and observation queries."""
+
+    def __init__(
+        self,
+        *,
+        dependency_edges: tuple[DeclaredDependency, ...] = (),
+        snapshots: tuple[ServiceObservations, ...] = (),
+        health_disabled: frozenset[str] = frozenset(),
+        dependency_error: str | None = None,
+        unsupported: tuple[str, ...] = (),
+        **kwargs: object,
+    ) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._edges = dependency_edges
+        self._snapshots = list(snapshots)
+        self._health_disabled = health_disabled
+        self._dependency_error = dependency_error
+        self._unsupported = unsupported
+
+    def list_dependencies(self, *, project_root: Path, compose_file: Path) -> DeclaredDependencies:
+        if self._unsupported:
+            return DeclaredDependencies(unsupported=self._unsupported)
+        if self._dependency_error:
+            return DeclaredDependencies(error=self._dependency_error)
+        return DeclaredDependencies(
+            services=self._declared.names,
+            dependencies=self._edges,
+            healthcheck_disabled=self._health_disabled,
+        )
+
+    def observe_services(
+        self, *, project_name: str, project_root: Path, compose_file: Path
+    ) -> ServiceObservations:
+        self.observe_calls.append(project_name)
+        if len(self._snapshots) > 1:
+            return self._snapshots.pop(0)
+        return self._snapshots[0] if self._snapshots else ServiceObservations()
+
+
+class TickingClock:
+    """Advances only when the wait sleeps, so no test spends real time."""
+
+    def __init__(self) -> None:
+        self.time = 0.0
+
+    def now(self) -> float:
+        return self.time
+
+    def sleep(self, seconds: float) -> None:
+        self.time += seconds
+
+
+def healthy(scope: object, service: str, health: str = "healthy") -> ServiceObservation:
+    name = f"{scope.project_name}-{service}-1"  # type: ignore[attr-defined]
+    return ServiceObservation(f"id-{service}", name, service, "running", health, None, ())
+
+
+def test_a_dependency_cycle_refuses_before_anything_is_started(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_started"),
+            DeclaredDependency("db", "web", "service_started"),
+        ),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_DEPENDENCY_CYCLE"
+    assert adapter.starts == [], "nothing may be started when the graph is refused"
+    assert any("depends on" in line for line in result.lines)
+
+
+def test_a_dependency_on_a_missing_service_refuses_before_starting(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        dependency_edges=(DeclaredDependency("web", "ghost", "service_started"),),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_DEPENDENCY_UNDECLARED"
+    assert adapter.starts == []
+
+
+def test_a_profile_naming_an_unknown_service_refuses_before_starting(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(declared=DeclaredServices(("web",)))
+
+    result = start_project(
+        profile(services={"typo": {"readiness": []}}), root, adapter=adapter, environ={}
+    )
+
+    assert result.code == "UP_SERVICE_UNDECLARED"
+    assert adapter.starts == []
+
+
+def test_a_condition_this_version_cannot_order_against_refuses(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)), unsupported=("Compose reported something new.",)
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_DEPENDENCY_UNSUPPORTED"
+    assert adapter.starts == []
+    assert "--no-wait" in (result.remedy or "")
+
+
+def test_unreadable_dependencies_warn_and_still_start(tmp_path: Path) -> None:
+    """Ordering is lost; the project is not."""
+
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        dependency_error="Compose dependency listing failed with exit code 1.",
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web"),)),),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.ok and result.code == "UP_READY"
+    assert any("GRAPH_UNAVAILABLE" in line for line in result.lines)
+    assert adapter.starts, "the project should still be started"
+
+
+def test_a_successful_wait_reports_ready_and_shows_the_order(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        dependency_edges=(DeclaredDependency("web", "db", "service_healthy"),),
+        inventory=ResourceInventory(
+            scope.project_name,
+            containers=(
+                managed(scope, f"{scope.project_name}-web-1", "web"),
+                managed(scope, f"{scope.project_name}-db-1", "db"),
+            ),
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web"), healthy(scope, "db"))),),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+    text = "\n".join(result.lines)
+
+    assert result.ok and result.code == "UP_READY"
+    assert "Startup order (2 layers)" in text
+    assert "web depends on db (service_healthy" in text
+
+
+def test_a_service_that_never_becomes_ready_times_out_with_its_last_result(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web", "starting"),)),),
+    )
+
+    result = start_project(
+        profile(), root, adapter=adapter, environ={}, clock=TickingClock(), ready_timeout=5
+    )
+
+    assert not result.ok and result.code == "UP_READINESS_TIMEOUT"
+    assert any("compose health reports starting" in line for line in result.lines)
+    assert "--ready-timeout" in (result.remedy or "")
+
+
+def test_no_wait_reports_the_start_and_says_readiness_was_not_verified(
+    tmp_path: Path,
+) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(declared=DeclaredServices(("web",)))
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, wait=False)
+
+    assert result.ok and result.code == "UP_STARTED"
+    assert any("readiness was not verified" in line for line in result.lines)
+    assert adapter.observe_calls == [], "no-wait must not poll"
+
+
+def test_a_service_with_nothing_to_check_is_reported_as_unverified(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web", ""),)),),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, clock=TickingClock())
+
+    assert result.ok and result.code == "UP_READY_UNVERIFIED"
+    assert any("not that they are serving" in line for line in result.lines)
+
+
+def test_require_ready_refuses_to_accept_an_unverifiable_service(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web", ""),)),),
+    )
+
+    result = start_project(
+        profile(),
+        root,
+        adapter=adapter,
+        environ={},
+        clock=TickingClock(),
+        ready_timeout=5,
+        require_ready=True,
+    )
+
+    assert not result.ok and result.code == "UP_READINESS_TIMEOUT"
+
+
+def test_wait_for_project_starts_nothing(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+        snapshots=(ServiceObservations(items=(healthy(scope, "web"),)),),
+    )
+
+    result = wait_for_project(profile(), root, adapter=adapter, clock=TickingClock())
+
+    assert result.ok and result.code == "WAIT_READY"
+    assert adapter.starts == []
+
+
+def test_wait_for_project_refuses_a_bad_graph_with_its_own_prefix(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        dependency_edges=(
+            DeclaredDependency("web", "db", "service_started"),
+            DeclaredDependency("db", "web", "service_started"),
+        ),
+    )
+
+    assert wait_for_project(profile(), root, adapter=adapter).code == "WAIT_DEPENDENCY_CYCLE"
+
+
+def test_a_cancelled_wait_leaves_the_project_alone(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    scope = ownership_scope(profile(), root)
+    token = CancelToken()
+    token.cancel()
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)),
+        inventory=ResourceInventory(
+            scope.project_name, containers=(managed(scope, f"{scope.project_name}-web-1", "web"),)
+        ),
+    )
+
+    result = wait_for_project(profile(), root, adapter=adapter, cancel=token)
+
+    assert result.code == "WAIT_INTERRUPTED"
+    assert any("Nothing was stopped or removed" in line for line in result.lines)

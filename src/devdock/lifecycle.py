@@ -16,9 +16,20 @@ from pathlib import Path
 from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, RuntimeAdapter
 from devdock.adapters.compose import PROJECT_LABEL, START_TIMEOUT, STOP_TIMEOUT
 from devdock.cancellation import CancelToken
-from devdock.config import ProjectProfile
+from devdock.config import DependencyCondition, ProjectProfile
 from devdock.diagnostics import Finding, check_profile
 from devdock.failures import PERMISSION_DENIED_REMEDY, FailureExplanation, classify_failure
+from devdock.graph import DependencyGraph, GraphProblemKind, GraphProblems, build_graph
+from devdock.orchestrate import (
+    DEFAULT_DEADLINE,
+    DEFAULT_READY_TIMEOUT,
+    Clock,
+    Observer,
+    Snapshot,
+    WaitOutcome,
+    WaitStatus,
+    wait_for_ready,
+)
 from devdock.ownership import (
     OwnershipAssessment,
     OwnershipScope,
@@ -125,8 +136,20 @@ def start_project(
     timeout: float = START_TIMEOUT,
     show_output: bool = False,
     cancel: CancelToken | None = None,
+    wait: bool = True,
+    ready_timeout: float = DEFAULT_READY_TIMEOUT,
+    deadline: float = DEFAULT_DEADLINE,
+    require_ready: bool = False,
+    probe: ProbeCallable = run_probe,
+    clock: Clock | None = None,
 ) -> LifecycleResult:
-    """Validate, prove ownership, then start the project's services detached."""
+    """Validate, prove ownership, start the services, then wait for them to be ready.
+
+    The dependency graph is built before anything is started, because every
+    problem it can find -- a cycle, a condition that can never be met, a
+    dependency that does not exist -- would otherwise be discovered as a wait
+    that never ends.
+    """
 
     runtime = ComposeAdapter() if adapter is None else adapter
     env = os.environ if environ is None else environ
@@ -160,8 +183,12 @@ def start_project(
     if isinstance(compose_file, LifecycleResult):
         return compose_file
 
+    planned = project_graph(profile, scope, compose_file, runtime, "UP")
+    if isinstance(planned, LifecycleResult):
+        return planned
+
     assessment = assess_ownership(scope, runtime.list_project_resources(scope.project_name))
-    preview = assessment.explain() + advisories
+    preview = assessment.explain() + planned.notes + advisories
     if not assessment.safe_to_act:
         return _refusal(
             "UP_OWNERSHIP_CONFLICT",
@@ -226,16 +253,32 @@ def start_project(
             ),
             failure.remedy,
         )
-    return LifecycleResult(
-        "UP_STARTED",
-        True,
-        f"Started {scope.project_name}.",
-        preview
-        + _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True)
-        + (
-            "Services were started but readiness was not verified; a container can be "
-            "running without being ready to serve requests.",
-        ),
+    started = preview + _render_output(
+        outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True
+    )
+    if not wait:
+        return LifecycleResult(
+            "UP_STARTED",
+            True,
+            f"Started {scope.project_name}.",
+            started
+            + (
+                "Services were started but readiness was not verified; a container can be "
+                "running without being ready to serve requests. Drop --no-wait to verify.",
+            ),
+        )
+
+    waited = wait_for_ready(
+        planned.graph,
+        _project_observer(profile, scope, compose_file, runtime, planned.declared, probe),
+        clock=clock,
+        cancel=cancel,
+        ready_timeout=ready_timeout,
+        deadline=deadline,
+        require_ready=require_ready,
+    )
+    return _wait_result(
+        waited, "UP", lead=started + (planned.graph.explain() if planned.graph.nodes else ())
     )
 
 
@@ -580,3 +623,235 @@ def execute_stop(
         tuple(lines),
         None if verified else "Run 'devdock status' and retry 'devdock down'.",
     )
+
+
+# --- dependency graph and waiting -----------------------------------------
+
+
+# Which graph problem names the result when several are reported at once.
+# Ordered by how much each one explains: a cycle makes the rest moot, and a
+# missing health check is the most local of them.
+_GRAPH_PROBLEM_ORDER: tuple[GraphProblemKind, ...] = (
+    "cycle",
+    "conflicting_conditions",
+    "undeclared_service",
+    "undeclared_dependency",
+    "healthcheck_missing",
+)
+_GRAPH_PROBLEM_CODES: dict[GraphProblemKind, str] = {
+    "cycle": "_DEPENDENCY_CYCLE",
+    "conflicting_conditions": "_DEPENDENCY_CONFLICT",
+    "undeclared_service": "_SERVICE_UNDECLARED",
+    "undeclared_dependency": "_DEPENDENCY_UNDECLARED",
+    "healthcheck_missing": "_DEPENDENCY_UNHEALTHCHECKED",
+}
+_GRAPH_PROBLEM_REMEDIES: dict[GraphProblemKind, str] = {
+    "cycle": "Break the cycle shown above, then retry.",
+    "conflicting_conditions": "Remove or correct one of the two declarations, then retry.",
+    "undeclared_service": "Correct the service name in devdock.yaml, or add it to the "
+    "Compose file, then retry.",
+    "undeclared_dependency": "Correct the dependency name or add the service, then retry.",
+    "healthcheck_missing": "Give the service a health check, or depend on something it can "
+    "meet, then retry.",
+}
+
+# Outcome of a wait, as a code suffix shared by `up` and `wait`.
+_WAIT_CODES: dict[WaitStatus, str] = {
+    "ready": "_READY",
+    "unverified": "_READY_UNVERIFIED",
+    "timed_out": "_READINESS_TIMEOUT",
+    "deadline_exceeded": "_DEADLINE_EXCEEDED",
+    "failed": "_SERVICE_DIED",
+    "regressed": "_DEPENDENCY_REGRESSED",
+    "unstable": "_SERVICE_UNSTABLE",
+    "unsatisfiable": "_CONDITION_UNSATISFIABLE",
+    "cancelled": "_INTERRUPTED",
+    "unobservable": "_RUNTIME_UNOBSERVABLE",
+}
+_WAIT_REMEDIES: dict[WaitStatus, str] = {
+    "timed_out": "Raise --ready-timeout if the service is simply slow, or inspect it with "
+    "'docker compose logs'.",
+    "deadline_exceeded": "Raise --deadline, or run 'devdock status' to see what is outstanding.",
+    "failed": "Inspect the service with 'docker compose logs', correct it, then retry.",
+    "regressed": "Inspect the service with 'docker compose logs'. The project is still "
+    "running; 'devdock status' shows its current state.",
+    "unstable": "Inspect the service with 'docker compose logs'. A health check that is too "
+    "strict and a service that restarts under load both look like this.",
+    "unsatisfiable": "Correct the dependency condition in devdock.yaml or the Compose file, "
+    "then retry.",
+    "unobservable": "Confirm Docker is responding with 'devdock check', then retry.",
+    "cancelled": "Run 'devdock status' to see where the project got to, or 'devdock down' "
+    "to stop it.",
+}
+
+
+@dataclass(frozen=True)
+class ProjectGraph:
+    """A validated startup order, plus anything DevDock could not determine."""
+
+    graph: DependencyGraph
+    declared: tuple[str, ...]
+    notes: tuple[str, ...] = ()
+
+
+def project_graph(
+    profile: ProjectProfile,
+    scope: OwnershipScope,
+    compose_file: Path,
+    runtime: RuntimeAdapter,
+    prefix: str,
+) -> ProjectGraph | LifecycleResult:
+    """Merge Compose's dependencies with the profile's, or refuse with the reason.
+
+    Runs before anything is started, because every problem it can find is one
+    that would otherwise be discovered as a wait that never ends.
+    """
+
+    declared = runtime.list_declared_services(project_root=scope.root, compose_file=compose_file)
+    if declared.error:
+        return _refusal(
+            f"{prefix}_CONFIG_UNREADABLE",
+            "The Compose file's services could not be listed.",
+            (declared.error,),
+            "Run 'docker compose config' in the project to see the error, then correct it.",
+        )
+
+    dependencies = runtime.list_dependencies(project_root=scope.root, compose_file=compose_file)
+    notes: list[str] = []
+    compose_edges: dict[str, dict[str, DependencyCondition]] = {}
+    without_healthcheck: frozenset[str] = frozenset()
+    optional_edges: frozenset[tuple[str, str]] = frozenset()
+
+    if dependencies.unsupported:
+        return _refusal(
+            f"{prefix}_DEPENDENCY_UNSUPPORTED",
+            "Refusing to order this project: its Compose file uses something DevDock cannot model.",
+            dependencies.unsupported,
+            "Upgrade DevDock, or start without ordering using 'devdock up --no-wait'.",
+        )
+    if dependencies.error:
+        # Ordering is lost but the project is not: everything can still be
+        # started and waited for, just without knowing what waits for what.
+        notes.append(
+            f"[WARN] GRAPH_UNAVAILABLE: {dependencies.error} Dependencies declared in the "
+            "Compose file were not read, so startup order is not verified."
+        )
+    else:
+        without_healthcheck = dependencies.healthcheck_disabled
+        optional_edges = frozenset(
+            (item.service, item.depends_on)
+            for item in dependencies.dependencies
+            if not item.required
+        )
+        for item in dependencies.dependencies:
+            condition: DependencyCondition = item.condition  # type: ignore[assignment]
+            compose_edges.setdefault(item.service, {})[item.depends_on] = condition
+
+    built = build_graph(
+        declared.names,
+        compose_edges,
+        {name: service.depends_on for name, service in profile.services.items()},
+        without_healthcheck=without_healthcheck,
+        optional_edges=optional_edges,
+    )
+    if isinstance(built, GraphProblems):
+        kind = next(item for item in _GRAPH_PROBLEM_ORDER if item in built.kinds)
+        return _refusal(
+            f"{prefix}{_GRAPH_PROBLEM_CODES[kind]}",
+            "Refusing to act: the declared dependencies cannot produce a startup order.",
+            built.explain(),
+            _GRAPH_PROBLEM_REMEDIES[kind],
+        )
+    return ProjectGraph(built, declared.names, tuple(notes))
+
+
+def _project_observer(
+    profile: ProjectProfile,
+    scope: OwnershipScope,
+    compose_file: Path,
+    runtime: RuntimeAdapter,
+    declared: tuple[str, ...],
+    probe: ProbeCallable,
+) -> Observer:
+    """One snapshot of the project, built from the same parts ``status`` uses."""
+
+    def observe() -> Snapshot:
+        inventory = runtime.list_project_resources(scope.project_name)
+        if inventory.errors:
+            return Snapshot(error="; ".join(inventory.errors))
+        assessment = assess_ownership(scope, inventory)
+        observed = runtime.observe_services(
+            project_name=scope.project_name,
+            project_root=scope.root,
+            compose_file=compose_file,
+        )
+        if observed.error is not None:
+            return Snapshot(error=observed.error)
+        services, _ = build_service_statuses(
+            declared,
+            assessment.managed,
+            observed.items,
+            profiles=profile.services,
+            probe=probe,
+        )
+        return Snapshot(services)
+
+    return observe
+
+
+def _wait_result(
+    outcome: WaitOutcome, prefix: str, *, lead: tuple[str, ...] = ()
+) -> LifecycleResult:
+    """Turn an engine outcome into the command's code, text, and exit behavior."""
+
+    return LifecycleResult(
+        f"{prefix}{_WAIT_CODES[outcome.status]}",
+        outcome.ok,
+        outcome.summary,
+        lead + outcome.explain(),
+        _WAIT_REMEDIES.get(outcome.status),
+    )
+
+
+def wait_for_project(
+    profile: ProjectProfile,
+    root: Path,
+    *,
+    adapter: RuntimeAdapter | None = None,
+    probe: ProbeCallable = run_probe,
+    cancel: CancelToken | None = None,
+    ready_timeout: float = DEFAULT_READY_TIMEOUT,
+    deadline: float = DEFAULT_DEADLINE,
+    require_ready: bool = False,
+    clock: Clock | None = None,
+) -> LifecycleResult:
+    """Wait for an already-started project without starting anything.
+
+    Separate from ``up`` so a wait can be repeated: after an interrupt, from a
+    second terminal, or in a script that started the project some other way.
+    It mutates nothing, so unlike ``up`` it does not run the profile's checks
+    first -- the same reasoning as ``status``, where a report is most useful
+    when something is wrong.
+    """
+
+    runtime = ComposeAdapter() if adapter is None else adapter
+    scope = ownership_scope(profile, root)
+    compose_file = _gates(scope, runtime, "WAIT", "Cannot wait")
+    if isinstance(compose_file, LifecycleResult):
+        return compose_file
+
+    planned = project_graph(profile, scope, compose_file, runtime, "WAIT")
+    if isinstance(planned, LifecycleResult):
+        return planned
+
+    outcome = wait_for_ready(
+        planned.graph,
+        _project_observer(profile, scope, compose_file, runtime, planned.declared, probe),
+        clock=clock,
+        cancel=cancel,
+        ready_timeout=ready_timeout,
+        deadline=deadline,
+        require_ready=require_ready,
+    )
+    lead = scope.describe(boundary=False) + planned.notes
+    return _wait_result(outcome, "WAIT", lead=lead)

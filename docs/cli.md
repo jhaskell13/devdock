@@ -8,7 +8,8 @@ This page describes behavior currently implemented by DevDock. Options may be ad
 | --- | --- | --- |
 | `devdock init [DIRECTORY]` | `.` | Creates the directory if needed, then writes a starter `devdock.yaml`. Refuses to overwrite an existing profile. |
 | `devdock inspect [DIRECTORY]` | `.` | Finds the nearest project root and reports the profile and common Compose files. If a profile exists, validates it and reports the configured project, runtimes, and the Compose project name DevDock will manage. |
-| `devdock up [DIRECTORY]` | `.` | Runs the profile's checks, proves ownership, then starts the project's Compose services detached. Refuses before any mutation if a check fails, the Compose file is missing or escapes the project, Docker is unavailable, or any resource under the project name is not DevDock's. |
+| `devdock up [DIRECTORY]` | `.` | Runs the profile's checks, proves ownership, validates the dependency graph, starts the project's Compose services detached, then waits for them to become ready. Refuses before any mutation if a check fails, the Compose file is missing or escapes the project, Docker is unavailable, the dependencies cannot produce a startup order, or any resource under the project name is not DevDock's. `--no-wait` starts without waiting. |
+| `devdock wait [DIRECTORY]` | `.` | Waits for an already-started project to become ready. Starts, stops and changes nothing. |
 | `devdock down [DIRECTORY]` | `.` | Previews then stops and removes the project's DevDock-managed containers and networks. Volumes are never removed. Requires confirmation or `--yes` when there is something to stop; `--dry-run` previews only. |
 | `devdock status [DIRECTORY]` | `.` | Reports each declared service's container, state, Compose health, readiness class, and published ports. Read-only; ownership conflicts are listed, not treated as a refusal. |
 | `devdock check [DIRECTORY]` | `.` | Finds the nearest project root, requires `devdock.yaml`, validates it, then runs the checks declared by that profile. |
@@ -88,6 +89,8 @@ The merged graph must produce a startup order. These are reported together in on
 | A dependency cycle | One concrete path through each cyclic group, as `a depends on b depends on a`, plus every service involved |
 
 A cycle is reported once per cyclic group with a single representative path, not once per distinct cycle, because enumerating every cycle can be exponential. Breaking the reported path and running again reveals whatever remains. Rejecting a condition does not hide a cycle the same edge takes part in.
+
+A cycle written entirely inside the Compose file is rejected by Compose itself when DevDock lists the services, and surfaces as `UP_CONFIG_UNREADABLE` with Compose's own wording. `_DEPENDENCY_CYCLE` is for the cycles only the merged graph can see: ones where neither the Compose file nor `devdock.yaml` is cyclic on its own.
 
 A `service_healthy` wait is only refused when the Compose file **disables** the health check. A service that simply does not declare one may still inherit a `HEALTHCHECK` from its image, which the Compose configuration cannot show, so refusing there would reject projects that work. That case is reported by the wait instead, once a running container shows whether health is being reported at all.
 
@@ -202,6 +205,40 @@ A second layer matches credentials by shape rather than by value, so it catches 
 Neither layer is a guarantee. A secret with no recognizable shape, not present in DevDock's environment, and not in a named assignment can still appear in output. Redaction also scans at most 256 KB; beyond that the output is truncated first.
 
 This is a mitigation, not a guarantee. Compose also reads the project's `.env` file, which DevDock never opens, so a value that exists only there cannot be recognized and could appear in output. Treat `--show-output` as a deliberate disclosure and review what you paste elsewhere.
+
+## Waiting for readiness
+
+`devdock up` waits by default; `--no-wait` starts and returns. `devdock wait` does the waiting without starting anything, which is what to run after an interrupt, from a second terminal, or in a script that started the project some other way.
+
+Before anything is started, the dependency graph is built and validated. Every problem it can find — a cycle, a dependency that does not exist, a condition that can never be met — would otherwise be discovered as a wait that never ends, so it is reported as a refusal instead, and nothing is mutated.
+
+### What the wait does
+
+Each poll takes one snapshot of the project: the ownership inventory, `docker compose ps`, and every readiness probe for every running service. A service is settled when it is not blocked and every readiness source agrees. The poll interval starts at 0.25 s and backs off to 2 s, so a long wait is not thousands of queries.
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `--ready-timeout` | 60 s | How long one service may take. **Counted from when its dependencies are satisfied**, not from when the command started, so a service deep in the graph is not charged for its ancestors' slowness. |
+| `--deadline` | 300 s | How long the whole startup may take. Overrides any remaining per-service budget. |
+| `--require-ready` | off | Treat a service with no readiness source as *not* ready. By default such a service settles as running, because there is nothing further to check. |
+| `--timeout` | 300 s | Unrelated to the above: how long the `docker compose up` command itself may run. |
+
+### What ends a wait
+
+A wait does not simply run out of time when it can say something better. These are checked in order of how much each explains:
+
+| Outcome | Meaning |
+| --- | --- |
+| `_DEPENDENCY_REGRESSED` | A service that had become ready then exited, went unhealthy, or vanished. Its dependents are not left to time out one at a time. |
+| `_CONDITION_UNSATISFIABLE` | A declared condition can never be met — waiting for health on a service that reports none, or for completion of one that exited non-zero. |
+| `_SERVICE_DIED` | A service exited before it ever became ready. |
+| `_SERVICE_UNSTABLE` | A service became ready and lost it three times. Reported rather than waited out; below that threshold, flapping is waited through, because a service that steadies is ready. |
+| `_READINESS_TIMEOUT` | A service exceeded `--ready-timeout`. The last failing probe result is included. |
+| `_DEADLINE_EXCEEDED` | The whole startup exceeded `--deadline`. |
+| `_RUNTIME_UNOBSERVABLE` | Three consecutive status queries failed. |
+| `_INTERRUPTED` | You pressed Ctrl+C. |
+
+**Nothing is torn down on any of these.** DevDock does not remove resources you did not ask it to remove; each result says what to run next.
 
 ## Stopping services
 
@@ -357,11 +394,32 @@ These stop a command before anything runs. The prefix names the command.
 | `_PLAN_STALE` | `DOWN` | The managed containers changed between the plan and the confirmation. |
 | `_INTERRUPTED` | `UP`, `DOWN` | You interrupted the operation. Nothing was removed; what already existed is left as it was. Exit status `130`. |
 
+### Dependency and readiness codes
+
+| Code suffix | Commands | Meaning |
+| --- | --- | --- |
+| `_DEPENDENCY_CYCLE` | `UP`, `WAIT` | The declared dependencies contain a cycle. One path through each cyclic group is printed. |
+| `_DEPENDENCY_CONFLICT` | `UP`, `WAIT` | Two declarations of one edge cannot both hold, such as `service_healthy` and `service_completed_successfully`. |
+| `_SERVICE_UNDECLARED` | `UP`, `WAIT` | `devdock.yaml` configures a service the Compose file does not declare. |
+| `_DEPENDENCY_UNDECLARED` | `UP`, `WAIT` | A dependency names a service that does not exist. |
+| `_DEPENDENCY_UNHEALTHCHECKED` | `UP`, `WAIT` | A `service_healthy` wait on a service whose Compose file disables its health check. |
+| `_DEPENDENCY_UNSUPPORTED` | `UP`, `WAIT` | Compose reported a dependency condition this version cannot order against. Start with `--no-wait` or upgrade DevDock. |
+| `_READY` | `UP`, `WAIT` | Every service is ready, and each was verified by a source. Exit `0`. |
+| `_READY_UNVERIFIED` | `UP`, `WAIT` | Every service settled, but some have no readiness source, so DevDock can show they are running and not that they are serving. Exit `0`. The services are named. |
+| `_READINESS_TIMEOUT` | `UP`, `WAIT` | A service exceeded `--ready-timeout`. |
+| `_DEADLINE_EXCEEDED` | `UP`, `WAIT` | The startup exceeded `--deadline`. |
+| `_SERVICE_DIED` | `UP`, `WAIT` | A service failed before becoming ready. |
+| `_SERVICE_UNSTABLE` | `UP`, `WAIT` | A service kept losing readiness. |
+| `_DEPENDENCY_REGRESSED` | `UP`, `WAIT` | A service that had become ready did not stay that way. |
+| `_CONDITION_UNSATISFIABLE` | `UP`, `WAIT` | A declared condition can never be met. |
+| `_RUNTIME_UNOBSERVABLE` | `UP`, `WAIT` | The runtime stopped answering during the wait. |
+| `GRAPH_UNAVAILABLE` | warning | The Compose file's dependencies could not be read, so startup order is not verified. The wait still runs. |
+
 ### Lifecycle outcomes
 
 | Code | Exit | Meaning |
 | --- | --- | --- |
-| `UP_STARTED` | 0 | Compose started the services. Readiness was not verified. |
+| `UP_STARTED` | 0 | Compose started the services and `--no-wait` was given, so readiness was not verified. |
 | `UP_TIMED_OUT`, `DOWN_TIMED_OUT` | 1 | The operation exceeded `--timeout`; resources may be partially created or removed. |
 | `STATUS_REPORTED` | 0 | The report is complete. |
 | `STATUS_INCOMPLETE` | 1 | A runtime query failed; the partial report is still shown. |

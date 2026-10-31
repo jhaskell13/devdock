@@ -19,9 +19,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from devdock.cancellation import CancelToken
 from devdock.config import DependencyCondition
 from devdock.graph import Dependency, DependencyGraph
 from devdock.status import ReadinessSource, ServiceStatus, SourceResult
+
+# Re-exported: a wait is the other half of what a cancel token is for, and a
+# caller of this module should not have to know which file it lives in.
+__all__ = ["CancelToken"]
 
 WaitStatus = Literal[
     "ready",  # every service settled, and each was verified by a source
@@ -83,20 +88,6 @@ class RealClock:
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
-
-
-class CancelToken:
-    """A flag someone else sets to stop the wait at the next safe point."""
-
-    def __init__(self) -> None:
-        self._cancelled = False
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancelled
-
-    def cancel(self) -> None:
-        self._cancelled = True
 
 
 @dataclass(frozen=True)

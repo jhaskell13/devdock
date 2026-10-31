@@ -11,10 +11,22 @@ python scripts/demo.py
 ```
 
 It copies this directory to a temporary location (so the Compose project name
-is unique to the run), then steps through inspect, check, status, up, a
-repeated up, a `--dry-run` preview, an ownership refusal, down, and a repeated
-down. It removes everything it created, including the volume that DevDock
-deliberately preserves.
+is unique to the run), then steps through inspect, check, status, a waiting
+`up`, a standalone `wait`, a repeated up, a `--dry-run` preview, an ownership
+refusal, down, and a repeated down. It removes everything it created,
+including the volume that DevDock deliberately preserves.
+
+The project is built to show every readiness class in one run:
+
+| Service | What it is | Reported as |
+| --- | --- | --- |
+| `migrate` | Runs once and exits `0` | `exited cleanly` |
+| `web` | Health check *and* a published port with an HTTP probe | `ready`, with both sources listed |
+| `worker` | Neither | `running (readiness unverified)` |
+
+The `depends_on` entries give it a real startup order: nothing starts before
+the migration finishes, and `worker` waits for `web` to be healthy. `devdock
+up` prints that order before it acts.
 
 Add `--keep` to leave the project running for manual exploration; the script
 prints the cleanup command.

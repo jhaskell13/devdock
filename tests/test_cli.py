@@ -504,3 +504,109 @@ def test_an_ordinary_refusal_still_exits_1(tmp_path: Path, monkeypatch: pytest.M
     )
 
     assert runner.invoke(app, ["up", str(tmp_path)]).exit_code == 1
+
+
+# --- wait flags ---------------------------------------------------------
+
+
+def _project(tmp_path: Path) -> Path:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_up_waits_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_start(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("UP_READY", True, "All services are ready.")
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(app, ["up", str(_project(tmp_path))])
+
+    assert result.exit_code == 0
+    assert seen["wait"] is True
+    assert seen["require_ready"] is False
+
+
+def test_up_accepts_no_wait_and_the_timing_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_start(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("UP_STARTED", True, "Started.")
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(
+        app,
+        [
+            "up",
+            str(_project(tmp_path)),
+            "--no-wait",
+            "--ready-timeout",
+            "12",
+            "--deadline",
+            "34",
+            "--require-ready",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen["wait"] is False
+    assert (seen["ready_timeout"], seen["deadline"]) == (12.0, 34.0)
+    assert seen["require_ready"] is True
+
+
+def test_wait_passes_its_options_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_wait(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("WAIT_READY", True, "All services are ready.")
+
+    monkeypatch.setattr(cli, "wait_for_project", fake_wait)
+
+    result = runner.invoke(
+        app, ["wait", str(_project(tmp_path)), "--ready-timeout", "7", "--deadline", "8"]
+    )
+
+    assert result.exit_code == 0
+    assert (seen["ready_timeout"], seen["deadline"]) == (7.0, 8.0)
+    assert "WAIT_READY" in result.stdout
+
+
+def test_wait_reports_a_timeout_on_stderr_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "wait_for_project",
+        lambda *_a, **_k: LifecycleResult(
+            "WAIT_READINESS_TIMEOUT", False, "db did not become ready.", (), "Raise it."
+        ),
+    )
+
+    result = runner.invoke(app, ["wait", str(_project(tmp_path))])
+
+    assert result.exit_code == 1
+    assert "WAIT_READINESS_TIMEOUT" in result.stderr
+
+
+def test_the_timing_flags_reject_nonsense(tmp_path: Path) -> None:
+    for flag in ("--ready-timeout", "--deadline"):
+        result = runner.invoke(app, ["up", str(_project(tmp_path)), flag, "0"])
+        assert result.exit_code != 0
+
+
+def test_wait_does_not_offer_a_way_to_mutate_the_project() -> None:
+    """It is a read-only command; nothing in its options should suggest otherwise."""
+
+    text = runner.invoke(app, ["wait", "--help"]).stdout
+
+    for mutating in ("--yes", "--dry-run", "--show-output", "--timeout "):
+        assert mutating not in text
