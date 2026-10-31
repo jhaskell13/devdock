@@ -313,7 +313,8 @@ def test_up_waits_and_reports_what_proved_each_service_ready(project: Path) -> N
     assert "worker depends on web (service_healthy" in text
     assert "[PASS] compose health reports healthy" in text
     assert "[PASS] http GET 127.0.0.1:" in text
-    assert "migrate: exited_ok" in text
+    # The display label, which `status` uses for the same state.
+    assert "migrate: exited cleanly" in text
 
 
 def test_a_second_up_is_already_ready(project: Path) -> None:

@@ -28,6 +28,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- `devdock up` reported a completed one-shot service as `exited_ok` while `devdock status` called the same state `exited cleanly`. Both now use the display label.
 - Docker commands ran in DevDock's own process group, so a terminal's Ctrl+C went straight to `docker` as well — the terminal, not DevDock, was interrupting an operation part-way through, and DevDock only found out afterwards. Each command now runs in a group of its own. On POSIX the whole group is signalled when a command is cancelled or times out, so a helper process is not left behind, and no exit path can leave a running child.
 - Captured command output was unbounded. It is now written to a temporary file instead of a pipe, so a command cannot stall on a full buffer and partial output survives a timeout, and at most 1 MB is read back. Line endings are normalized so Windows and POSIX output are the same string.
 - A readiness probe with a non-ASCII `path` crashed `devdock status` with a traceback instead of reporting a result: the HTTP client rejects such a request with a `ValueError`, which is neither a transport error nor one the probe module raises. Those paths are now refused when the profile loads, a `#` fragment is refused with them, and the probe treats any remaining `ValueError` as an unreadable response rather than letting it escape a read-only command.

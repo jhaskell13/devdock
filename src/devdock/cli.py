@@ -1,5 +1,6 @@
 """DevDock command-line interface."""
 
+import os
 import signal
 import sys
 from collections.abc import Iterator
@@ -28,6 +29,7 @@ from devdock.metadata import read_python_metadata
 from devdock.orchestrate import DEFAULT_DEADLINE, DEFAULT_READY_TIMEOUT
 from devdock.ownership import ownership_scope
 from devdock.redaction import sanitize
+from devdock.render import ColorChoice, Style, choose_color, spaced
 
 app = typer.Typer(
     name="devdock",
@@ -36,10 +38,20 @@ app = typer.Typer(
 )
 
 
-def _echo(message: str = "", *, err: bool = False) -> None:
-    """Print one line with control characters neutralized."""
+# Set once by the top-level callback, read by every write. Styling is applied
+# after sanitizing, never before: by then the text holds no escape sequences
+# except the ones chosen here.
+_STYLE = Style()
 
-    typer.echo(sanitize(message), err=err)
+
+def _echo(message: str = "", *, err: bool = False, plain: bool = False) -> None:
+    """Print one line: control characters neutralized, then styled."""
+
+    text = sanitize(message)
+    # Click strips escape sequences itself when the stream is not a terminal.
+    # Telling it the decision keeps --color always meaningful through a pipe,
+    # and keeps it stripping as a second line of defence when colour is off.
+    typer.echo(text if plain else _STYLE.line(text), err=err, color=_STYLE.color)
 
 
 def _show_version(value: bool) -> None:
@@ -56,8 +68,18 @@ def main(
             "--version", callback=_show_version, is_eager=True, help="Show the version and exit."
         ),
     ] = False,
+    color: Annotated[
+        ColorChoice,
+        typer.Option(
+            "--color",
+            help="When to colour output. Detection honours NO_COLOR and FORCE_COLOR.",
+        ),
+    ] = "auto",
 ) -> None:
     """Inspect, check, start, and stop local development environments."""
+
+    global _STYLE
+    _STYLE = Style(choose_color(color, sys.stdout, os.environ))
 
 
 @app.command()
@@ -230,9 +252,10 @@ def _render(result: LifecycleResult) -> None:
 
     stream_err = not result.ok
     _echo(f"[{'OK' if result.ok else 'REFUSED'}] {result.code}: {result.summary}", err=stream_err)
-    for line in result.lines:
+    for line in spaced(result.lines):
         _echo(line, err=stream_err)
     if result.remedy:
+        _echo("", err=stream_err)
         _echo(f"Suggested action: {result.remedy}", err=stream_err)
     if not result.ok:
         # An interrupt is reported as itself rather than as a failure, so a
@@ -420,17 +443,35 @@ def check(
     root, profile = _load_project(directory)
 
     findings = check_profile(profile, root)
-    failures = 0
+    tally: dict[str, int] = {}
     for finding in findings:
+        tally[finding.severity] = tally.get(finding.severity, 0) + 1
+        if finding.severity != "PASS":
+            # Room around the findings that need reading.
+            _echo()
         _echo(f"[{finding.severity}] {finding.code}: {finding.summary}")
         for evidence in finding.evidence:
             _echo(f"       Evidence: {evidence}")
         if finding.remedy:
             _echo(f"       Suggested action: {finding.remedy}")
-        if finding.severity == "FAIL":
-            failures += 1
-    if failures:
+    _echo()
+    _echo("Summary: " + _tally(tally) + ".")
+    if tally.get("FAIL"):
         raise typer.Exit(code=1)
+
+
+_SEVERITY_WORDS = {"PASS": "passed", "FAIL": "failed", "WARN": "warning", "SKIP": "skipped"}
+
+
+def _tally(tally: dict[str, int]) -> str:
+    """Render the counts in a fixed order, naming only what happened."""
+
+    parts = [
+        f"{tally[severity]} {word}"
+        for severity, word in _SEVERITY_WORDS.items()
+        if tally.get(severity)
+    ]
+    return ", ".join(parts) or "nothing to check"
 
 
 if __name__ == "__main__":

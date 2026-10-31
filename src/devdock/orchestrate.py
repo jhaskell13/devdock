@@ -23,7 +23,13 @@ from typing import Literal, Protocol
 from devdock.cancellation import CancelToken
 from devdock.config import DependencyCondition
 from devdock.graph import Dependency, DependencyGraph
-from devdock.status import ReadinessSource, ServiceStatus, SourceResult
+from devdock.status import (
+    READINESS_LABELS,
+    Readiness,
+    ReadinessSource,
+    ServiceStatus,
+    SourceResult,
+)
 
 # Re-exported: a wait is the other half of what a cancel token is for, and a
 # caller of this module should not have to know which file it lives in.
@@ -138,7 +144,7 @@ class ServiceProgress:
     """What the wait has learned about one service so far."""
 
     service: str
-    readiness: str = "missing"
+    readiness: Readiness = "missing"
     exit_code: int | None = None
     sources: tuple[SourceResult, ...] = ()
     successes: int = 0
@@ -213,7 +219,11 @@ def _progress_line(item: ServiceProgress, elapsed: float) -> str:
     else:
         timing = ""
     flapped = f"; became ready and lost it {item.flaps} time(s)" if item.flaps else ""
-    return f"{item.readiness}{timing}{flapped}"
+    # The label, not the internal name: `status` already shows "exited
+    # cleanly" for the same state, and one project should not have two
+    # vocabularies for it.
+    label = READINESS_LABELS[item.readiness]
+    return f"{label}{timing}{flapped}"
 
 
 @dataclass

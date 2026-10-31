@@ -1,4 +1,5 @@
 import os
+import re
 import signal
 import threading
 import time
@@ -9,6 +10,7 @@ from typer.testing import CliRunner
 
 import devdock.adapters.compose as compose
 import devdock.cli as cli
+import devdock.render as render
 from devdock.adapters import NetworkRecord
 from devdock.cli import app
 from devdock.config import load_profile
@@ -646,3 +648,62 @@ def test_an_initialized_compose_project_passes_its_own_checks(tmp_path: Path) ->
     # The Docker findings depend on the machine; the point is that the profile
     # now causes them to be attempted at all.
     assert "DOCKER" in checked.stdout or "COMPOSE_CLI" in checked.stdout
+
+
+# --- styling cannot be injected -----------------------------------------
+
+
+def test_a_hostile_name_cannot_smuggle_styling_through_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordering that makes colour safe: sanitize first, then style.
+
+    A container name is chosen by whoever can talk to the Docker daemon. By
+    the time styling runs there are no escape sequences left in the text
+    except the ones DevDock put there, so a name cannot paint itself, hide a
+    line, or forge a marker.
+    """
+
+    hostile = "\x1b[2J\x1b[31mROOT\x07 pwned"
+    monkeypatch.setattr(
+        cli,
+        "project_status",
+        lambda *_a, **_k: LifecycleResult(
+            "STATUS_REPORTED", True, f"Status for {hostile}.", (f"  {hostile}: ready",)
+        ),
+    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--color", "always", "status", str(tmp_path)], color=True)
+
+    assert result.exit_code == 0
+    assert "\x1b[2J" not in result.stdout, "a clear-screen sequence survived"
+    assert "\x07" not in result.stdout
+    assert set(re.findall(r"\x1b\[[0-9;]*m", result.stdout)) <= {
+        render.RESET,
+        render.BOLD,
+        render.DIM,
+        render.RED,
+        render.GREEN,
+        render.YELLOW,
+        render.CYAN,
+    }
+
+
+def test_output_carries_no_styling_when_it_is_not_a_terminal(tmp_path: Path) -> None:
+    """Piping DevDock into a file must give the same text it always did."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "\x1b[" not in result.stdout
+
+
+def test_check_ends_with_a_count_of_what_it_found(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "Summary: 1 passed." in result.stdout
