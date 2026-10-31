@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -32,6 +33,7 @@ class RecordingRunner:
         cwd: Path | None = None,
         timeout: float,
         env: Mapping[str, str] | None = None,
+        cancel: object = None,
     ) -> CommandResult:
         self.calls.append((list(args), cwd, timeout))
         self.environments.append(env)
@@ -150,23 +152,24 @@ def test_check_profile_accepts_an_injected_adapter(tmp_path: Path) -> None:
     assert len(runner.calls) == 3
 
 
-def test_default_runner_never_uses_a_shell(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+def test_default_runner_never_uses_a_shell() -> None:
+    """Proved by behavior rather than by inspecting the call.
 
-    def fake_run(args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured["args"] = args
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(args, 0, "out", "err")
+    Shell metacharacters in an argument are only inert if no shell ever sees
+    them, so the test passes some to a real child and checks that it received
+    them unchanged. That holds the same claim on Windows, where a shell would
+    be cmd.exe and the quoting rules are different.
+    """
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    hostile = "a; rm -rf / && echo $HOME `id` | cat > /tmp/x"
 
-    result = run_command(("docker", "compose", "version"), timeout=1.5)
+    result = run_command(
+        (sys.executable, "-c", "import sys; sys.stdout.write(sys.argv[1])", hostile),
+        timeout=30,
+    )
 
-    assert result == CommandResult(0, "out", "err")
-    assert captured["args"] == ["docker", "compose", "version"]
-    assert captured.get("shell") in (None, False)
-    assert captured["timeout"] == 1.5
-    assert captured["capture_output"] is True and captured["check"] is False
+    assert result.returncode == 0
+    assert result.stdout == hostile
 
 
 # --- resource inventory ---------------------------------------------------

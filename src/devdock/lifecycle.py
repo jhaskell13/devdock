@@ -15,6 +15,7 @@ from pathlib import Path
 
 from devdock.adapters import ComposeAdapter, ContainerRecord, NetworkRecord, RuntimeAdapter
 from devdock.adapters.compose import PROJECT_LABEL, START_TIMEOUT, STOP_TIMEOUT
+from devdock.cancellation import CancelToken
 from devdock.config import ProjectProfile
 from devdock.diagnostics import Finding, check_profile
 from devdock.failures import PERMISSION_DENIED_REMEDY, FailureExplanation, classify_failure
@@ -123,6 +124,7 @@ def start_project(
     environ: Mapping[str, str] | None = None,
     timeout: float = START_TIMEOUT,
     show_output: bool = False,
+    cancel: CancelToken | None = None,
 ) -> LifecycleResult:
     """Validate, prove ownership, then start the project's services detached."""
 
@@ -173,9 +175,24 @@ def start_project(
         project_root=scope.root,
         compose_file=compose_file,
         timeout=timeout,
+        cancel=cancel,
     )
     captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
 
+    if outcome.status == "cancelled":
+        return _refusal(
+            "UP_INTERRUPTED",
+            "Start was interrupted at your request.",
+            preview
+            + (
+                "Compose was stopped partway through, so some containers may exist and "
+                "some may not. Nothing was removed.",
+                _inspect_hint(scope),
+            )
+            + captured,
+            "Run 'devdock status' to see what exists, then 'devdock up' to continue or "
+            "'devdock down' to remove it.",
+        )
     if outcome.status == "unavailable":
         return _refusal(
             "UP_RUNTIME_UNAVAILABLE",
@@ -455,6 +472,7 @@ def execute_stop(
     environ: Mapping[str, str] | None = None,
     timeout: float = STOP_TIMEOUT,
     show_output: bool = False,
+    cancel: CancelToken | None = None,
 ) -> LifecycleResult:
     """Carry out an approved stop plan and verify what remains afterwards."""
 
@@ -487,8 +505,17 @@ def execute_stop(
         project_root=scope.root,
         compose_file=compose_file,
         timeout=timeout,
+        cancel=cancel,
     )
     captured = _render_output(outcome.raw_stdout, outcome.raw_stderr, env, show_output)
+    if outcome.status == "cancelled":
+        return _refusal(
+            "DOWN_INTERRUPTED",
+            "Stop was interrupted at your request.",
+            ("Some containers may already be stopped or removed; volumes are untouched.",)
+            + captured,
+            "Run 'devdock status' to see what remains, then 'devdock down' again.",
+        )
     if outcome.status == "unavailable":
         return _refusal(
             "DOWN_RUNTIME_UNAVAILABLE",

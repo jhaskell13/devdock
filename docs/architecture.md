@@ -16,6 +16,12 @@ Typer commands
 Profile loader (Pydantic + safe YAML parsing)
   └─ ProjectProfile, schema version 1
 
+Command execution (adapters/compose.py)
+  ├─ argument arrays, never shell strings; explicit timeout on every call
+  ├─ child in its own process group so a terminal's Ctrl+C reaches DevDock, not docker
+  ├─ cancellation polled while waiting; POSIX signals the group so helpers go too
+  └─ output captured to a temporary file, bounded on read, newlines normalized
+
 Runtime adapter (adapters/)
   ├─ RuntimeAdapter protocol: capability detection, config validation, resource inventory
   ├─ ComposeAdapter: argument arrays, bounded timeouts, injectable CommandRunner
@@ -150,6 +156,18 @@ A health check absent from the Compose file is not proof that a service has none
 ## Adapter boundary
 
 All Docker invocation lives behind `RuntimeAdapter`. The Compose implementation builds argument arrays, never shell strings, runs each command with an explicit timeout, and returns status-only values (`ComposeCapabilities`, `ConfigValidation`, `ResourceInventory`, `ServiceObservations`) for everything inspect-side. The one exception is `OperationOutcome` from `start` and `stop`, which carries raw output in fields named `raw_` because a failed operation is not actionable without it; `lifecycle.py` is its only consumer and always passes it through `redaction` first. Diagnostics and later command handlers consume those values; tests inject a fake `CommandRunner` instead of patching module globals. `ownership.py` holds the pure rules for what DevDock owns: the derived project name and the label values Compose writes when DevDock runs it with an absolute `--project-directory` and `-f`. The adapter's inventory returns only identity fields and those labels, each JSON-encoded in the template so untrusted values cannot break the line format. Every Compose invocation receives a pinned environment (`HARDENED_ENVIRONMENT`) so project `.env` settings cannot change what a command removes. Lifecycle commands print the assessment before acting and refuse when any resource under the name is not provably theirs. Destructive cleanup and volume removal require a separate preview/authorization design.
+
+## Interrupts
+
+`cancellation.py` holds one thing, a `CancelToken`, and imports nothing. Both ends of the system need it — the command runner, to abandon a child, and the wait engine, to stop polling — and putting it anywhere else would make one of those depend on the other.
+
+The runner starts every child in a process group of its own. That is the whole reason interrupts work: a terminal delivers Ctrl+C to every process in the foreground group, so without it the terminal interrupts `docker` directly, part-way through whatever it was doing, and DevDock learns about it afterwards. The two platforms spell the request differently, and the difference is not symmetric — Windows *accepts* `start_new_session` and ignores it rather than refusing it, so a wrong branch there would isolate nothing and say nothing. The choice is therefore a pure function returning a value, asserted for both platforms on every platform, rather than a conditional buried in the call.
+
+Termination differs honestly. On POSIX the process group is signalled, asked first and killed if it does not go, so a helper the command started is not left behind; the group id is the child's pid, because it leads the group it was given, and reading it back would be a second chance to fail. Windows has no graceful equivalent and reaches only the command itself. Every exit path from the runner — returning, timing out, cancelling, or any exception including `SystemExit` raised by a signal handler — passes through a `finally` that leaves no running child, because a child outliving the command that started it is the one outcome with no way back.
+
+Capture goes to a temporary file rather than a pipe. A command cannot stall on a full buffer, partial output survives a timeout or an interrupt, and how much is read back is DevDock's decision rather than the child's. Newlines are normalized on read so a Windows command's output is the same string a POSIX one's would be and every rule downstream — classification, redaction, line counting — behaves identically.
+
+The CLI installs handlers only for the length of an operation and always restores them, so DevDock does not change what an interrupt means anywhere else. The first one asks the work to stop, so the command can finish describing what it did; the second raises `SystemExit(130)` directly, which Click passes through, where a `KeyboardInterrupt` would have become "Aborted!" and exit 1. Both paths exit `130` on every platform, and neither removes anything: tearing a project down is an action the user did not ask for, and milestone 4 owns recovery.
 
 SQLite is deferred until the product needs durable snapshots or recovery state. The first milestone has no daemon, web UI, cloud connection, credential store, or AI features.
 

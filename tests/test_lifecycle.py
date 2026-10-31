@@ -58,7 +58,13 @@ class FakeAdapter:
         return self._inventory or ResourceInventory(project_name)
 
     def start(
-        self, *, project_name: str, project_root: Path, compose_file: Path, timeout: float
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float,
+        cancel: object = None,
     ) -> OperationOutcome:
         self.starts.append(
             {
@@ -505,7 +511,13 @@ class StopAdapter(StatusAdapter):
         return super().list_project_resources(project_name)
 
     def stop(
-        self, *, project_name: str, project_root: Path, compose_file: Path, timeout: float
+        self,
+        *,
+        project_name: str,
+        project_root: Path,
+        compose_file: Path,
+        timeout: float,
+        cancel: object = None,
     ) -> OperationOutcome:
         self.stops.append({"project_name": project_name, "timeout": timeout})
         return self._stop_outcome

@@ -8,8 +8,33 @@ import pytest
 
 import devdock.adapters.compose as compose
 import devdock.diagnostics as diagnostics
+from devdock.adapters import ComposeAdapter
 from devdock.config import ProjectProfile
 from devdock.diagnostics import check_profile
+
+
+class CountingRunner:
+    """Scripted command results, with a record of how many ran.
+
+    Injected rather than monkeypatched over ``subprocess``: the adapter owns
+    how a command is executed, and a diagnostics test has no business knowing
+    whether that is ``run`` or ``Popen``.
+    """
+
+    def __init__(self, *results: object) -> None:
+        self._results = list(results)
+        self.calls = 0
+
+    def __call__(self, args: object, **kwargs: object) -> object:
+        self.calls += 1
+        result = self._results.pop(0) if len(self._results) > 1 else self._results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def compose_adapter(*results: object, executable: str | None = "docker-test") -> ComposeAdapter:
+    return ComposeAdapter(CountingRunner(*results), locate=lambda _: executable)  # type: ignore[arg-type]
 
 
 def test_unsupported_runtime_is_actionable(tmp_path: Path) -> None:
@@ -250,21 +275,14 @@ def test_compose_file_symlink_cannot_escape_project(
             return outside
         return original_resolve(path, *args, **kwargs)
 
-    calls = 0
-
-    def fake_run(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
     monkeypatch.setattr(Path, "resolve", resolve_escape)
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(compose.subprocess, "run", fake_run)
+    runner = CountingRunner(SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker-test")  # type: ignore[arg-type]
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
 
     assert any(item.code == "COMPOSE_FILE_OUTSIDE_PROJECT" for item in findings)
-    assert calls == 2  # CLI/plugin and daemon only; the external Compose file is never parsed.
+    assert runner.calls == 2  # CLI/plugin and daemon only; the external file is never parsed.
 
 
 def test_port_collision_reports_actionable_finding(tmp_path: Path) -> None:
@@ -292,6 +310,7 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
         runtimes={"docker": "compose"},
         compose_file=Path("compose.yaml"),
     )
+    calls: list[list[str]] = []
     results = iter(
         [
             SimpleNamespace(returncode=0, stdout="compose-output-secret", stderr=""),
@@ -299,16 +318,14 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    calls: list[list[str]] = []
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
 
-    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+    def runner(command: list[str], **_: object) -> SimpleNamespace:
         calls.append(command)
         return next(results)
 
-    monkeypatch.setattr(compose.subprocess, "run", fake_run)
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker-test")  # type: ignore[arg-type]
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     codes = {item.code for item in findings}
 
     assert {
@@ -338,10 +355,12 @@ def test_compose_parser_errors_do_not_echo_interpolated_values(
             SimpleNamespace(returncode=1, stdout="", stderr="TOKEN=secret-value"),
         ]
     )
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     invalid = next(item for item in findings if item.code == "COMPOSE_CONFIG_INVALID")
 
     assert "secret-value" not in repr(invalid)
@@ -395,10 +414,12 @@ def test_compose_parser_is_checked_even_when_daemon_is_unavailable(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     codes = {item.code for item in findings}
 
     assert "DOCKER_DAEMON_UNAVAILABLE" in codes
@@ -426,10 +447,12 @@ def test_socket_permission_problems_get_their_own_finding(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(compose.subprocess, "run", lambda *_a, **_k: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     by_code = {item.code: item for item in findings}
 
     assert by_code["DOCKER_DAEMON_PERMISSION_DENIED"].severity == "FAIL"
@@ -451,10 +474,12 @@ def test_daemon_probe_with_empty_success_is_reported_unavailable(
             SimpleNamespace(returncode=0, stdout="", stderr="some client-side error"),
         ]
     )
-    monkeypatch.setattr(compose.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(compose.subprocess, "run", lambda *_a, **_k: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    codes = {item.code for item in check_profile(profile, tmp_path)}
+    codes = {item.code for item in check_profile(profile, tmp_path, adapter=adapter)}
 
     assert "DOCKER_DAEMON_UNAVAILABLE" in codes
     assert "DOCKER_DAEMON_AVAILABLE" not in codes

@@ -6,11 +6,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import tempfile
+import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 from devdock.adapters.base import (
+    CommandCancelled,
     CommandResult,
     CommandRunner,
     ComposeCapabilities,
@@ -27,6 +33,7 @@ from devdock.adapters.base import (
     ServiceObservation,
     ServiceObservations,
 )
+from devdock.cancellation import CancelToken
 
 VERSION_TIMEOUT = 5.0
 DAEMON_TIMEOUT = 5.0
@@ -83,25 +90,167 @@ HARDENED_ENVIRONMENT: Mapping[str, str] = {
 }
 
 
+# Windows' CREATE_NEW_PROCESS_GROUP. Named here because the constant does not
+# exist in `subprocess` on other platforms, so it cannot be referenced directly
+# in code that must import everywhere.
+WINDOWS_NEW_PROCESS_GROUP = 0x00000200
+
+# How long a child is given to exit after being asked, before it is killed.
+TERMINATION_GRACE = 5.0
+# How often a running child is checked for cancellation. Ten wake-ups a second
+# costs nothing next to the processes being waited on, and bounds how long a
+# Ctrl+C appears to do nothing.
+CANCEL_POLL_INTERVAL = 0.1
+# Output beyond this is dropped. The whole stream is written to a temporary
+# file rather than a pipe, so this bounds what DevDock holds in memory rather
+# than what the child may produce.
+MAX_CAPTURED_BYTES = 1_000_000
+
+
+@dataclass(frozen=True)
+class ProcessIsolation:
+    """How one platform asks for a child in a process group of its own.
+
+    Both fields are always passed to ``Popen``; exactly one of them does
+    anything on any given platform, and the other is inert there. Carried as a
+    value rather than applied directly so each platform's choice can be
+    asserted on every platform, which matters more here than usual: Windows
+    accepts ``start_new_session`` and *ignores* it rather than refusing it, so
+    choosing the wrong field there would isolate nothing and say nothing.
+    """
+
+    creationflags: int = 0
+    start_new_session: bool = False
+
+
+def process_isolation(platform_name: str = os.name) -> ProcessIsolation:
+    """Isolation settings for ``platform_name``, defaulting to this machine.
+
+    Without isolation, a Ctrl+C in the terminal goes to every process in the
+    foreground group, so the terminal -- not DevDock -- interrupts ``docker``
+    halfway through whatever it was doing, and DevDock learns about it
+    afterwards. With it, the signal arrives only here and DevDock decides what
+    the child does.
+    """
+
+    if platform_name == "nt":
+        return ProcessIsolation(
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", WINDOWS_NEW_PROCESS_GROUP)
+        )
+    return ProcessIsolation(start_new_session=True)
+
+
+def _stop_child(process: subprocess.Popen[bytes], grace: float = TERMINATION_GRACE) -> None:
+    """End a child and everything it started, politely first where that exists.
+
+    On POSIX the whole process group is signalled, so a child that spawned its
+    own helpers does not leave them behind. The group id is the child's pid,
+    because ``start_new_session`` made it the leader of a new one; reading it
+    back with ``getpgid`` would be a second chance to fail. The pid cannot have
+    been reused, because nothing has reaped the child yet.
+
+    Windows has no graceful equivalent: ``terminate`` is ``TerminateProcess``,
+    which is immediate, and it reaches only the child itself. A grandchild
+    there is not DevDock's to clean up. It also has no ``SIGKILL``, which is
+    why the two stages are named rather than carried as signal numbers --
+    naming the numbers up front would look at ``signal.SIGKILL`` on a platform
+    that does not define it, and fail there for every command.
+    """
+
+    if process.poll() is not None:
+        return
+    for stage in ("ask", "force"):
+        try:
+            if os.name == "nt":
+                process.terminate() if stage == "ask" else process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGTERM if stage == "ask" else signal.SIGKILL)
+        except (OSError, ValueError):
+            # Already gone, or no longer ours to signal. Either way there is
+            # nothing to clean up and nothing useful to report.
+            return
+        try:
+            process.wait(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _read_capped(handle: IO[bytes]) -> str:
+    """Read back captured output, bounded, decoded, with newlines normalized.
+
+    Newline translation is done here rather than by opening the child's stream
+    in text mode so that a Windows child's output is byte-for-byte the same
+    string a POSIX child's would be, and every downstream rule -- failure
+    classification, redaction, line counting -- behaves identically.
+    """
+
+    handle.seek(0)
+    data = handle.read(MAX_CAPTURED_BYTES + 1)
+    truncated = len(data) > MAX_CAPTURED_BYTES
+    text = data[:MAX_CAPTURED_BYTES].decode("utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if truncated:
+        text += f"\n[DevDock stopped reading after {MAX_CAPTURED_BYTES} bytes.]"
+    return text
+
+
 def run_command(
     args: Sequence[str],
     *,
     cwd: Path | None = None,
     timeout: float,
     env: Mapping[str, str] | None = None,
+    cancel: CancelToken | None = None,
 ) -> CommandResult:
-    """Default runner: no shell, captured text output, enforced timeout."""
+    """Default runner: no shell, bounded captured output, enforced timeout.
 
-    completed = subprocess.run(
-        list(args),
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=None if env is None else dict(env),
-    )
-    return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+    The child runs in its own process group and is waited for in short steps
+    so a cancellation is noticed promptly. Every exit from this function --
+    returning, timing out, cancelling, or any exception including
+    ``KeyboardInterrupt`` and ``SystemExit`` -- leaves no running child behind.
+    """
+
+    arguments = list(args)
+    isolation = process_isolation()
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        # Temporary files rather than pipes: the child can write as much as it
+        # likes without filling a pipe buffer and blocking, partial output
+        # survives a timeout or a cancellation, and how much DevDock reads
+        # back is this process's decision rather than the child's.
+        process = subprocess.Popen(
+            arguments,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            env=None if env is None else dict(env),
+            creationflags=isolation.creationflags,
+            start_new_session=isolation.start_new_session,
+        )
+        try:
+            started = time.monotonic()
+            while True:
+                try:
+                    process.wait(timeout=CANCEL_POLL_INTERVAL)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if cancel is not None and cancel.cancelled:
+                    _stop_child(process)
+                    raise CommandCancelled(_read_capped(out), _read_capped(err))
+                if time.monotonic() - started >= timeout:
+                    _stop_child(process)
+                    raise subprocess.TimeoutExpired(
+                        arguments, timeout, output=_read_capped(out), stderr=_read_capped(err)
+                    )
+            return CommandResult(process.returncode, _read_capped(out), _read_capped(err))
+        finally:
+            # Covers every path the loop above does not: an interrupt
+            # delivered between two waits, a SystemExit raised by a signal
+            # handler, or anything unforeseen. A child outliving the command
+            # that started it is the one outcome with no way back.
+            _stop_child(process)
 
 
 def _locate_docker(name: str) -> str | None:
@@ -279,6 +428,7 @@ class ComposeAdapter:
         project_root: Path,
         compose_file: Path,
         timeout: float = START_TIMEOUT,
+        cancel: CancelToken | None = None,
     ) -> OperationOutcome:
         """Run ``docker compose up --detach`` for exactly this project.
 
@@ -293,7 +443,7 @@ class ComposeAdapter:
             return OperationOutcome("unavailable")
         args = self._project_args(executable, project_name, project_root, compose_file)
         args += ["up", "--detach", "--remove-orphans=false"]
-        return self._run_operation(args, project_root, timeout)
+        return self._run_operation(args, project_root, timeout, cancel)
 
     def _project_args(
         self, executable: str, project_name: str, project_root: Path, compose_file: Path
@@ -320,6 +470,7 @@ class ComposeAdapter:
         project_root: Path,
         compose_file: Path,
         timeout: float = STOP_TIMEOUT,
+        cancel: CancelToken | None = None,
     ) -> OperationOutcome:
         """Run ``docker compose down`` for exactly this project.
 
@@ -334,13 +485,25 @@ class ComposeAdapter:
             return OperationOutcome("unavailable")
         args = self._project_args(executable, project_name, project_root, compose_file)
         args += ["down", "--remove-orphans=false"]
-        return self._run_operation(args, project_root, timeout)
+        return self._run_operation(args, project_root, timeout, cancel)
 
     def _run_operation(
-        self, args: list[str], project_root: Path, timeout: float
+        self,
+        args: list[str],
+        project_root: Path,
+        timeout: float,
+        cancel: CancelToken | None = None,
     ) -> OperationOutcome:
         try:
-            result = self._runner(args, cwd=project_root, timeout=timeout, env=self._environment())
+            result = self._runner(
+                args, cwd=project_root, timeout=timeout, env=self._environment(), cancel=cancel
+            )
+        except CommandCancelled as cancelled:
+            return OperationOutcome(
+                "cancelled",
+                raw_stdout=cancelled.raw_stdout,
+                raw_stderr=cancelled.raw_stderr,
+            )
         except subprocess.TimeoutExpired as expired:
             return OperationOutcome(
                 "timed_out",

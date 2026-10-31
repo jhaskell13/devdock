@@ -1,6 +1,9 @@
 """DevDock command-line interface."""
 
+import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Annotated
 
@@ -9,6 +12,7 @@ import yaml
 
 from devdock import __version__
 from devdock.adapters.compose import START_TIMEOUT, STOP_TIMEOUT
+from devdock.cancellation import CancelToken
 from devdock.config import ProfileError, ProjectProfile, load_profile
 from devdock.diagnostics import check_profile
 from devdock.discovery import COMPOSE_NAMES, CONFIG_NAME, discover_project_result
@@ -155,6 +159,60 @@ def _interactive() -> bool:
     return sys.stdin.isatty()
 
 
+# POSIX shells report a signal-terminated process as 128 plus the signal
+# number. 130 is the conventional result of an interrupt, and DevDock uses it
+# on every platform so a script sees one answer rather than one per operating
+# system.
+EXIT_INTERRUPTED = 130
+
+# Ctrl+Break, which only Windows raises. Handled alongside Ctrl+C so a user
+# who reaches for it gets the same orderly stop rather than an abrupt one.
+_BREAK_SIGNAL = getattr(signal, "SIGBREAK", None)
+
+
+@contextmanager
+def interruptible() -> Iterator[CancelToken]:
+    """Turn an interrupt into a cancellation for the duration of one operation.
+
+    The first interrupt asks the work to stop, so the command can finish
+    reporting and leave the project in a state it has described. A second one
+    exits immediately with the same status, for anyone who does not want to
+    wait for the first to take effect.
+
+    Handlers are installed only for as long as they are wanted and the
+    previous ones are always restored, so DevDock does not change how an
+    interrupt behaves anywhere else. Installing them requires the main thread;
+    where that is not available the token is simply never set by a signal,
+    which degrades to the behavior before any of this existed.
+    """
+
+    token = CancelToken()
+    signals = [signal.SIGINT] + ([_BREAK_SIGNAL] if _BREAK_SIGNAL is not None else [])
+
+    def on_signal(signum: int, frame: object) -> None:
+        if token.cancelled:
+            # SystemExit rather than KeyboardInterrupt: Click converts a
+            # KeyboardInterrupt into "Aborted!" and exit 1, which would hide
+            # both the reason and the status.
+            raise SystemExit(EXIT_INTERRUPTED)
+        token.cancel()
+        # No embedded newline: output is sanitized, which would render it as "?".
+        _echo("Stopping. Press Ctrl+C again to exit at once.", err=True)
+
+    previous: list[tuple[int, object]] = []
+    try:
+        for number in signals:
+            try:
+                previous.append((number, signal.signal(number, on_signal)))
+            except (ValueError, OSError):  # not the main thread, or not supported here
+                continue
+        yield token
+    finally:
+        for number, handler in previous:
+            with suppress(ValueError, OSError):
+                signal.signal(number, handler)  # type: ignore[arg-type]
+
+
 def _render(result: LifecycleResult) -> None:
     """Print a lifecycle result and exit non-zero when it did not succeed."""
 
@@ -165,7 +223,9 @@ def _render(result: LifecycleResult) -> None:
     if result.remedy:
         _echo(f"Suggested action: {result.remedy}", err=stream_err)
     if not result.ok:
-        raise typer.Exit(code=1)
+        # An interrupt is reported as itself rather than as a failure, so a
+        # script can tell "you stopped this" from "this did not work".
+        raise typer.Exit(code=EXIT_INTERRUPTED if result.code.endswith("_INTERRUPTED") else 1)
 
 
 @app.command()
@@ -183,7 +243,10 @@ def up(
     """Start the project's Compose services detached, without waiting for readiness."""
 
     root, profile = _load_project(directory)
-    _render(start_project(profile, root, timeout=timeout, show_output=show_output))
+    with interruptible() as cancel:
+        _render(
+            start_project(profile, root, timeout=timeout, show_output=show_output, cancel=cancel)
+        )
 
 
 @app.command()
@@ -230,7 +293,8 @@ def down(
         if not typer.confirm("Stop and remove the resources listed above?", default=False):
             _echo("[REFUSED] DOWN_CANCELLED: No changes were made.", err=True)
             raise typer.Exit(code=1)
-    _render(execute_stop(plan, timeout=timeout, show_output=show_output))
+    with interruptible() as cancel:
+        _render(execute_stop(plan, timeout=timeout, show_output=show_output, cancel=cancel))
 
 
 @app.command()

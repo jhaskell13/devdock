@@ -1,3 +1,7 @@
+import os
+import signal
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -5,8 +9,11 @@ from typer.testing import CliRunner
 
 import devdock.adapters.compose as compose
 import devdock.cli as cli
+from devdock.adapters import NetworkRecord
 from devdock.cli import app
+from devdock.config import load_profile
 from devdock.lifecycle import LifecycleResult, StopPlan
+from devdock.ownership import OwnershipAssessment, ownership_scope
 
 runner = CliRunner()
 
@@ -362,3 +369,138 @@ def test_init_produces_a_valid_profile_for_yaml_hostile_directory_names(
     assert created.exit_code == 0, created.stderr
     assert checked.exit_code == 0, checked.stdout + checked.stderr
     assert f"Profile is valid for {name}" in checked.stdout
+
+
+# --- interrupt handling -------------------------------------------------
+
+
+def test_interruptible_restores_the_handlers_it_replaced() -> None:
+    """DevDock must not change how an interrupt behaves outside its own work."""
+
+    before = signal.getsignal(signal.SIGINT)
+
+    with cli.interruptible():
+        assert signal.getsignal(signal.SIGINT) is not before
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_interruptible_restores_the_handlers_even_when_the_work_fails() -> None:
+    before = signal.getsignal(signal.SIGINT)
+
+    with pytest.raises(RuntimeError), cli.interruptible():
+        raise RuntimeError("boom")
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_the_first_interrupt_asks_the_work_to_stop(capsys: pytest.CaptureFixture[str]) -> None:
+    with cli.interruptible() as token:
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        assert not token.cancelled
+
+        handler(signal.SIGINT, None)
+
+        assert token.cancelled
+    assert "Stopping" in capsys.readouterr().err
+
+
+def test_the_second_interrupt_exits_with_the_interrupt_status() -> None:
+    """SystemExit, not KeyboardInterrupt: Click turns the latter into exit 1."""
+
+    with cli.interruptible():
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+
+        with pytest.raises(SystemExit) as raised:
+            handler(signal.SIGINT, None)
+
+    assert raised.value.code == cli.EXIT_INTERRUPTED == 130
+
+
+def test_interruptible_works_where_handlers_cannot_be_installed() -> None:
+    """A worker thread cannot take signals; the context must still be usable."""
+
+    outcome: list[object] = []
+
+    def run() -> None:
+        try:
+            with cli.interruptible() as token:
+                outcome.append(token.cancelled)
+        except BaseException as error:  # pragma: no cover - the failure we are excluding
+            outcome.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert outcome == [False]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
+def test_a_real_interrupt_reaches_the_handler() -> None:
+    """The handler is wired to the actual signal, not only callable by hand."""
+
+    with cli.interruptible() as token:
+        os.kill(os.getpid(), signal.SIGINT)
+        deadline = time.monotonic() + 5
+        while not token.cancelled and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert token.cancelled
+
+
+@pytest.mark.parametrize(
+    ("command", "patched", "code"),
+    [("up", "start_project", "UP_INTERRUPTED"), ("down", "execute_stop", "DOWN_INTERRUPTED")],
+)
+def test_an_interrupted_operation_exits_130_not_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, patched: str, code: str
+) -> None:
+    """A script must be able to tell "you stopped this" from "this did not work"."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def interrupted(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult(code, False, "Interrupted at your request.", (), "Run status.")
+
+    monkeypatch.setattr(cli, patched, interrupted)
+    if command == "down":
+        monkeypatch.setattr(
+            cli,
+            "plan_stop",
+            lambda *_a, **_k: StopPlan(
+                scope=ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path),
+                assessment=OwnershipAssessment(
+                    scope=ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path),
+                    managed=(),
+                    conflicts=(),
+                    networks=(NetworkRecord("n", "net"),),
+                    volumes=(),
+                ),
+                affected=(),
+                remaining=(),
+                networks=(NetworkRecord("n", "net"),),
+                volumes=(),
+            ),
+        )
+
+    result = runner.invoke(app, [command, str(tmp_path), *(["--yes"] if command == "down" else [])])
+
+    assert result.exit_code == cli.EXIT_INTERRUPTED == 130
+    assert code in result.stderr
+
+
+def test_an_ordinary_refusal_still_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "start_project",
+        lambda *_a, **_k: LifecycleResult("UP_FAILED", False, "No.", (), "Fix it."),
+    )
+
+    assert runner.invoke(app, ["up", str(tmp_path)]).exit_code == 1

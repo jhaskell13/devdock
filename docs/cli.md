@@ -140,6 +140,7 @@ A TCP probe can pass where an HTTP probe on the same port fails. That is the poi
 
 - `init` prints the created profile path to standard output and exits `0`. If the profile already exists, it writes an error to standard error and exits `1` without replacing the file.
 - `inspect` prints the selected root and discovered files to standard output. Invalid profile data is reported on standard error and exits `1`; otherwise it exits `0`.
+- An interrupt (Ctrl+C, or Ctrl+Break on Windows) during `up` or `down` stops the operation and exits `130` on every platform. The first interrupt asks the work to stop so DevDock can finish describing what it did; a second exits at once with the same status. Nothing is torn down either way — DevDock does not remove resources you did not ask it to remove, and `UP_INTERRUPTED` says what to run next.
 - `up` reports a port probe that failed as `[ADVISORY]` rather than `[FAIL]`, since a published port is usually held by this project's own services and Compose's bind is authoritative. `up` prints its result as `[OK]` or `[REFUSED]` with a stable code, the ownership preview, and any redacted runtime output. Successful runs go to standard output and exit `0`; refusals and failures go to standard error and exit `1`.
 - `down` prints the plan on standard output, then `[OK] DOWN_STOPPED`, `DOWN_NOTHING_TO_STOP`, or `DOWN_DRY_RUN` with exit `0`; refusals, cancellation, `DOWN_PARTIAL`, and failures go to standard error with exit `1`.
 - `status` prints `[OK] STATUS_REPORTED` followed by the table on standard output and exits `0`, or `STATUS_INCOMPLETE`/a refusal code on standard error with exit `1`.
@@ -264,6 +265,14 @@ Services are listed in declared order, one row per container when a service has 
 
 Exit code is `0` when the report is complete and `1` when a required input is missing or any runtime query failed; a partial table is still printed in that case. Readiness does not affect the exit code yet; scripts should wait for the planned machine-readable output rather than parse this table.
 
+### How commands are run
+
+Every Docker command is an argument array with an explicit timeout, started in a process group of its own. The isolation matters for interrupts: a terminal delivers Ctrl+C to every process in the foreground group, so without it the terminal would be interrupting `docker` directly, part-way through whatever it was doing, and DevDock would only learn about it afterwards. With it, the interrupt arrives at DevDock, which decides what the child does and reports what happened.
+
+On POSIX the whole group is signalled when a command is cancelled or times out, so a helper process the command started is not left behind; it is asked to stop first and killed if it does not. Windows has no graceful equivalent — termination there is immediate and reaches the command itself, not anything it started. A command leaves no running child behind on any exit path, including an interrupt.
+
+Captured output is written to a temporary file rather than a pipe, so a command that produces a great deal of output cannot fill a buffer and stall, and partial output survives a timeout or an interrupt. DevDock reads back at most 1 MB and says so when it stops. Line endings are normalized, so a Windows command's output is the same string a POSIX one's would be and every rule downstream behaves identically.
+
 ### Environment handed to Compose
 
 DevDock runs Compose with its own environment plus three pinned settings: `COMPOSE_REMOVE_ORPHANS=false`, `COMPOSE_ANSI=never`, and `COMPOSE_PROGRESS=plain`. Compose reads `COMPOSE_*` settings from the project's `.env`, which DevDock treats as untrusted; shell values take precedence over `.env` in Compose, so these pins keep the `down` preview truthful and the captured output free of colour codes whatever `.env` says. Other `.env` content, including `DOCKER_HOST` or `DOCKER_CONTEXT`, is honoured by Compose exactly as it would be if you ran `docker compose` in that directory yourself; DevDock does not read the file to check.
@@ -346,6 +355,7 @@ These stop a command before anything runs. The prefix names the command.
 | `_CONFIRMATION_REQUIRED` | `DOWN` | Standard input is not a terminal and `--yes` was not given. |
 | `_CANCELLED` | `DOWN` | The user declined the prompt. |
 | `_PLAN_STALE` | `DOWN` | The managed containers changed between the plan and the confirmation. |
+| `_INTERRUPTED` | `UP`, `DOWN` | You interrupted the operation. Nothing was removed; what already existed is left as it was. Exit status `130`. |
 
 ### Lifecycle outcomes
 

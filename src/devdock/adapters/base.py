@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from devdock.cancellation import CancelToken
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -29,12 +31,28 @@ class CommandResult:
     stderr: str
 
 
+class CommandCancelled(Exception):
+    """Raised when a command was abandoned because its cancel token was set.
+
+    Carries whatever the child had already written. That output is as
+    untrusted as any other, and is named ``raw_`` for the same reason
+    ``OperationOutcome``'s fields are.
+    """
+
+    def __init__(self, raw_stdout: str = "", raw_stderr: str = "") -> None:
+        super().__init__("the command was cancelled")
+        self.raw_stdout = raw_stdout
+        self.raw_stderr = raw_stderr
+
+
 class CommandRunner(Protocol):
     """Run an argument array with a timeout and return its captured result.
 
     Implementations must never pass the command through a shell. They raise
-    ``OSError`` when the executable cannot be started and
-    ``subprocess.TimeoutExpired`` when ``timeout`` elapses.
+    ``OSError`` when the executable cannot be started,
+    ``subprocess.TimeoutExpired`` when ``timeout`` elapses, and
+    ``CommandCancelled`` when ``cancel`` is set while the command is running.
+    They must not leave a running child behind on any of those paths.
     """
 
     def __call__(
@@ -44,6 +62,7 @@ class CommandRunner(Protocol):
         cwd: Path | None = None,
         timeout: float,
         env: Mapping[str, str] | None = None,
+        cancel: CancelToken | None = None,
     ) -> CommandResult: ...
 
 
@@ -129,7 +148,7 @@ class ResourceInventory:
     errors: tuple[str, ...] = ()
 
 
-OperationStatus = Literal["succeeded", "failed", "timed_out", "unavailable"]
+OperationStatus = Literal["succeeded", "failed", "timed_out", "unavailable", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -262,6 +281,7 @@ class RuntimeAdapter(Protocol):
         project_root: Path,
         compose_file: Path,
         timeout: float,
+        cancel: CancelToken | None = None,
     ) -> OperationOutcome:
         """Start the project's services detached, without waiting for readiness."""
         ...
@@ -273,6 +293,7 @@ class RuntimeAdapter(Protocol):
         project_root: Path,
         compose_file: Path,
         timeout: float,
+        cancel: CancelToken | None = None,
     ) -> OperationOutcome:
         """Stop and remove the project's containers and networks; never volumes or images."""
         ...
