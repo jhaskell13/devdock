@@ -8,9 +8,9 @@ required_env: []
 required_files: []
 required_dirs: []
 ports: []
-# Dependencies and readiness probes are validated today and will drive
-# `devdock up --wait`; see ROADMAP.md, milestone 3. Probes may only target
-# loopback, and the port is the one published on the host.
+# Dependencies give `up` and `wait` their startup order; readiness probes are
+# checked by `up`, `wait`, and `status`. Probes may only target loopback, and
+# the port is the one published on the host.
 services: {}
 #  web:
 #    depends_on:

@@ -1,8 +1,8 @@
 # DevDock demo project
 
 A disposable project for exercising DevDock against a real Docker daemon. It
-creates only local throwaway resources: two containers, one network, and one
-named volume, all under a Compose project name derived from this directory.
+creates only local throwaway resources: three containers, one network, and
+one named volume, all under a Compose project name derived from this directory.
 
 Run the scripted walkthrough from the repository root:
 
@@ -26,7 +26,8 @@ The project is built to show every readiness class in one run:
 
 The `depends_on` entries give it a real startup order: nothing starts before
 the migration finishes, and `worker` waits for `web` to be healthy. `devdock
-up` prints that order before it acts.
+up` starts one layer at a time and reports that order, and what proved each
+service ready, with its result.
 
 Add `--keep` to leave the project running for manual exploration; the script
 prints the cleanup command.
@@ -39,9 +40,13 @@ cp -r examples/demo /tmp/devdock-demo && cd /tmp/devdock-demo
 devdock inspect .      # shows the derived Compose project name
 devdock check .        # diagnostics; should pass with Docker running
 devdock status .       # every service "missing" before the first start
-devdock up .           # starts both services detached
+devdock up .           # starts a layer at a time, then waits for readiness
 devdock status .       # web "ready", worker "running (readiness unverified)"
+devdock wait .         # starts nothing; already ready, so it returns at once
 devdock up .           # idempotent; reconciles to the same state
+
+devdock up . --no-wait        # start without waiting, as earlier versions did
+devdock up . --require-ready  # refuse to accept a service nothing verifies
 devdock down . --dry-run   # preview; changes nothing
 devdock down . --yes       # stops containers and networks, preserves the volume
 devdock down . --yes       # DOWN_NOTHING_TO_STOP

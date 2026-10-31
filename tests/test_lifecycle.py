@@ -1639,3 +1639,34 @@ def test_an_interrupt_between_layers_stops_the_start(tmp_path: Path) -> None:
     assert result.code == "UP_INTERRUPTED"
     assert len(cancelling.starts) == 1, "no further layer may be started after a cancel"
     assert any("Nothing was removed" in line for line in result.lines)
+
+
+def test_no_wait_needs_no_dependency_graph_at_all(tmp_path: Path) -> None:
+    """Its own advice names --no-wait as the way past a graph it cannot build.
+
+    That was only true if --no-wait actually skips building one. It also
+    saves two Docker calls on a start that has no ordering to get wrong.
+    """
+
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web", "db")),
+        unsupported=("Compose reported something new.",),
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={}, wait=False)
+
+    assert result.ok and result.code == "UP_STARTED"
+    assert adapter.starts, "the project should still start"
+
+
+def test_a_graph_that_cannot_be_built_still_refuses_a_waiting_start(tmp_path: Path) -> None:
+    root = make_project(tmp_path)
+    adapter = WaitAdapter(
+        declared=DeclaredServices(("web",)), unsupported=("Compose reported something new.",)
+    )
+
+    result = start_project(profile(), root, adapter=adapter, environ={})
+
+    assert result.code == "UP_DEPENDENCY_UNSUPPORTED"
+    assert adapter.starts == []

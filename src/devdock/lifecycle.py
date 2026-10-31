@@ -206,10 +206,17 @@ def start_project(
             "Resolve the conflicts above, then retry.",
         )
 
-    planned = project_graph(profile, scope, compose_file, runtime, "UP")
-    if isinstance(planned, LifecycleResult):
-        return planned
-    preview = assessment.explain() + planned.notes + advisories
+    # Only when it will be used. The graph exists to order a start and to
+    # explain a wait, so building it with --no-wait costs two Docker calls
+    # and can refuse a start that has no ordering to get wrong -- which also
+    # made --no-wait useless as the escape hatch its own advice names.
+    planned: ProjectGraph | None = None
+    if wait:
+        built = project_graph(profile, scope, compose_file, runtime, "UP")
+        if isinstance(built, LifecycleResult):
+            return built
+        planned = built
+    preview = assessment.explain() + (planned.notes if planned else ()) + advisories
 
     captured: list[str] = []
 
@@ -226,7 +233,7 @@ def start_project(
             # Only when the ordering came from Compose itself. With a degraded
             # graph DevDock does not know the real dependencies, so Compose's
             # own ordering has to stay in charge.
-            no_deps=planned.ordered,
+            no_deps=planned is not None and planned.ordered,
             max_parallel=max_parallel,
         )
         failed = _start_failure(outcome, scope, env, show_output, timeout, services)
@@ -242,7 +249,7 @@ def start_project(
         )
         return None
 
-    staged = wait and stage
+    staged = wait and stage and planned is not None
 
     if not staged:
         whole = runtime.start(
@@ -276,6 +283,7 @@ def start_project(
     else:
         started = preview
 
+    assert planned is not None  # `wait` is true here, so the graph was built
     waited = wait_for_ready(
         planned.graph,
         _project_observer(profile, scope, compose_file, runtime, planned.declared, probe),
@@ -754,7 +762,8 @@ def project_graph(
             f"{prefix}_DEPENDENCY_UNSUPPORTED",
             "Refusing to order this project: its Compose file uses something DevDock cannot model.",
             dependencies.unsupported,
-            "Upgrade DevDock, or start without ordering using 'devdock up --no-wait'.",
+            "Upgrade DevDock, or start without ordering using 'devdock up --no-wait', "
+            "which needs no graph.",
         )
     if dependencies.error:
         # Ordering is lost but the project is not: everything can still be

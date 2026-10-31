@@ -8,7 +8,7 @@ Milestones 0 through 3 are complete. The CLI can create a profile, discover proj
 
 | Command | What it does | Changes the project or host? |
 | --- | --- | --- |
-| `devdock init [DIRECTORY]` | Creates a starter `devdock.yaml`. The directory defaults to the current directory. | Creates one profile file. |
+| `devdock init [DIRECTORY]` | Creates a starter `devdock.yaml`, pointing it at a Compose file if one is there. The directory defaults to the current directory. | Creates one profile file. |
 | `devdock inspect [DIRECTORY]` | Finds the nearest project profile or common Compose file, reports the marker used, nested roots, and known project files. | No. |
 | `devdock check [DIRECTORY]` | Validates the profile and checks declared Python, Docker/Compose, paths, ports, and environment requirements. Reports warnings and prerequisite-dependent checks it could not run. | No. |
 | `devdock up [DIRECTORY]` | Runs the checks, proves which Compose resources DevDock owns, validates the dependency graph, starts the project's services, then waits for them to become ready. Refuses before acting if any gate fails. `--no-wait` skips the wait. | Starts containers and networks for the derived Compose project. |
@@ -101,7 +101,7 @@ ports:
   - 8000
 ```
 
-The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml); field behavior and design limits are described in [`docs/architecture.md`](docs/architecture.md).
+A fuller example, with every field and a commented `services` block, is in [`devdock.example.yaml`](devdock.example.yaml); field behavior and design limits are described in [`docs/architecture.md`](docs/architecture.md).
 
 | Field | Required | Meaning in the current CLI |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ The complete starter example is in [`devdock.example.yaml`](devdock.example.yaml
 | `required_files` | No | Project-relative files that must exist. Absolute paths, backslashes, and lexical traversal are rejected. |
 | `required_dirs` | No | Project-relative directories that must exist. Symlinks resolving outside the project fail the check. |
 | `ports` | No | TCP ports from 1 through 65535 to probe on `127.0.0.1`. Availability is a point-in-time observation and may change immediately. |
-| `services` | No | Per-service `depends_on` conditions and `readiness` probes. `status` runs the probes and reports each source; `depends_on` is validated but not yet used for ordering, which arrives with `devdock up --wait`. See [`ROADMAP.md`](ROADMAP.md). |
+| `services` | No | Per-service `depends_on` conditions and `readiness` probes. `status` runs the probes and reports each source; `depends_on` gives `up` and `wait` their startup order. See [`ROADMAP.md`](ROADMAP.md). |
 
 Unknown profile fields are rejected so spelling mistakes do not silently pass validation. The current schema does not interpolate variables, load `.env`, or execute profile-provided commands. Readiness probes are limited to TCP and HTTP against loopback; there is no probe type that runs a command.
 
@@ -134,7 +134,8 @@ Do not commit real credentials, `.env` files, customer data, or other sensitive 
 ## Results and exit codes
 
 - Exit code `0`: the profile is valid and no check failed. Warnings or skipped dependent checks may be reported when DevDock cannot verify a target interpreter or prerequisite.
-- Exit code `1`: the profile is missing or invalid, or at least one check failed. Findings include a suggested action when DevDock can provide one.
+- Exit code `1`: the profile is missing or invalid, or at least one check failed.
+- Exit code `130`: you interrupted the command. Nothing is torn down. Findings include a suggested action when DevDock can provide one.
 - CLI usage errors use Typer's argument parsing exit behavior.
 
 `devdock up` starts the project's Compose services once the diagnostics pass, the declared dependencies produce a startup order, and DevDock can prove every resource under its derived project name is its own. It then waits for each service to become ready, reporting which dependency is blocking which and what proved each service ready; `--no-wait` skips that. `devdock wait` does the waiting without starting anything. `devdock status` shows per-service state, health, every readiness source, and a readiness class that keeps running distinct from ready. `devdock down` previews and confirms before stopping containers and networks, and never removes volumes. The checks are local diagnostics, not a guarantee that an application will start. Compose checks distinguish CLI/plugin response, daemon reachability, and Compose parsing. Output from Docker commands is hidden on success and for recognized failures; unrecognized failures show a redacted tail, and `--show-output` shows everything, still redacted. Interrupting `up`, `wait`, or `down` stops the operation and exits `130` without removing anything. Recovery of interrupted operations and any volume removal remain future roadmap work. Finding codes and evidence are documented in [`docs/cli.md`](docs/cli.md#diagnostic-codes).

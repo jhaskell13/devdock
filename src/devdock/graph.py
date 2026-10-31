@@ -166,7 +166,7 @@ class DependencyGraph:
         return None
 
     def explain(self) -> tuple[str, ...]:
-        """The startup plan, printed before a start acts on it."""
+        """The startup plan, reported with the result of the start."""
 
         if not self.nodes:
             return ("Startup order: no services are declared.",)

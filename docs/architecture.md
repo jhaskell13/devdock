@@ -1,6 +1,6 @@
 # Initial architecture
 
-DevDock is a Python CLI for inspecting, checking, starting, and stopping one local project's Docker Compose services. `inspect`, `check`, and `status` are read-only. `init` writes one profile file. `up` and `down` mutate only Compose resources DevDock can prove it created, after printing what they will touch.
+DevDock is a Python CLI for inspecting, checking, starting, and stopping one local project's Docker Compose services. `inspect`, `check`, and `status` are read-only. `init` writes one profile file. `up` and `down` mutate only Compose resources DevDock can prove it created. `down` prints what it will touch and asks first; `up` reports the ownership scope, the startup order it derived, and what proved each service ready, as part of its result.
 
 ## Runtime flow
 
@@ -36,7 +36,8 @@ Lifecycle (lifecycle.py)
   └─ returns redacted display lines and a stable code
 
 Status (status.py)
-  ├─ readiness classes: ready, running, starting, unhealthy, exited_ok, stopped, missing, unknown
+  ├─ readiness classes, shown by their labels: ready, running (readiness unverified),
+  │    starting, unhealthy, exited cleanly, stopped, missing, unknown
   ├─ classify_readiness(state, health, exit_code, sources) is the single source of that mapping
   ├─ a service is ready only when every source agrees; no source means running, not ready
   ├─ decides what to probe (running services only); the injected probe callable connects
@@ -64,6 +65,11 @@ Dependency graph (graph.py)
   ├─ rejects undeclared services, contradictory conditions, unmeetable health waits, cycles
   ├─ reports every problem in one pass; one representative path per cyclic group
   └─ returns sorted startup layers; pure functions over plain mappings
+
+Rendering (render.py)
+  ├─ the only module that emits an escape sequence, and it runs after sanitize
+  ├─ colour chosen from DevDock's own vocabulary, never from the text around it
+  └─ blank-line grouping; NO_COLOR, FORCE_COLOR, TERM and --color all honoured
 
 Failures (failures.py)
   ├─ literal-substring markers map runtime prose to a stable kind
@@ -100,7 +106,7 @@ The root YAML object has these fields:
 - `required_env`: optional list of environment variable names. DevDock checks whether each name is set in its process environment and never prints values.
 - `required_files` and `required_dirs`: optional project-relative filesystem paths. Lexical traversal and resolved symlinks outside the project are rejected by checks.
 - `ports`: optional distinct TCP ports to probe on loopback; results are momentary observations.
-- `services`: optional per-service `depends_on` conditions and `readiness` probes. Validated on load and not yet consumed by any command. Service names are re-validated against Compose's own shape so a name can never be read as a command-line option. Probes are `tcp` or `http` only, bounded by an explicit timeout, and restricted to loopback at load time and again before connecting; a profile is data and must not be able to direct DevDock at another host or run a command.
+- `services`: optional per-service `depends_on` conditions and `readiness` probes. `depends_on` gives `up` and `wait` their startup order; `readiness` is probed by `up`, `wait`, and `status`. Service names are re-validated against Compose's own shape so a name can never be read as a command-line option. Probes are `tcp` or `http` only, bounded by an explicit timeout, and restricted to loopback at load time and again before connecting; a profile is data and must not be able to direct DevDock at another host or run a command.
 
 Unknown fields are rejected so typos do not silently weaken a check. Profile values contain configuration only; credentials remain in the user's local environment.
 
@@ -150,6 +156,14 @@ Every result carries a phrase defined in that module, so the whole vocabulary is
 
 Service names are passed after `--`. Compose's schema permits names argv does not: verified against a real Compose, a service named `-weird` is reported as `unknown shorthand flag: 'e'` without the separator and as `no such service` with it. The adapter also re-validates each name, which is the same belt-and-braces as the project name, and this is the boundary where it matters. `--parallel` is one of Compose's global options and must precede the subcommand, so it is built in the shared project prefix rather than beside the `up` arguments.
 
+### Colour that untrusted text cannot reach
+
+`render.py` is the only module that writes an escape sequence, and it runs *after* `redaction.sanitize` has stripped every control character out of the line. That order is the whole safety argument: by the time a colour is chosen, the text holds no escapes except the ones chosen here, so a container name or a label value — picked by anyone who can reach the Docker daemon — cannot paint itself, hide a line, or forge a severity marker.
+
+What gets styled is decided from DevDock's own vocabulary: the severity markers it writes, the readiness labels it defines, the shape of its own headings. Never from the surrounding content. The worst a hostile name can do is contain the word `ready` and come out green.
+
+Escape sequences have no width, so the status table is padded before styling and stays aligned. The decision to colour is passed to Click as well as applied here, so an explicit `--color always` survives a pipe while the default still strips escapes as a second line of defence.
+
 ### Reading dependencies without reading secrets
 
 `ComposeAdapter.list_dependencies` is the only place DevDock asks Compose for the whole project document, because `depends_on` is the one ordering fact no narrower query exposes, and because Compose is the only thing that resolves `extends`, `include`, overrides, and profiles correctly. Parsing the YAML in DevDock would be safer with respect to disclosure and produce a confidently wrong graph.
@@ -162,7 +176,7 @@ Four facts survive parsing: service names, `depends_on` edges with their conditi
 
 A health check absent from the Compose file is not proof that a service has none, because the image may define `HEALTHCHECK`, which the configuration cannot show. Only `healthcheck: disable: true` is proof, so only that refuses a `service_healthy` wait before starting. The rest is reported by the wait, once a running container shows whether health is being reported at all.
 
-`graph.py` turns those declarations plus the Compose file's own into a startup order. It takes plain mappings and returns either a `DependencyGraph` with sorted layers or a `GraphProblems` listing everything wrong at once, in the same `X | Y` return style as `plan_stop`. It holds no CLI codes: problems carry a structural `kind` and the command that builds the graph maps those to the codes a user sees, so the graph rules stay testable without the command vocabulary. Tarjan's algorithm is written iteratively because a deeply chained Compose file must produce a refusal rather than a `RecursionError`. No command builds a graph yet.
+`graph.py` turns those declarations plus the Compose file's own into a startup order. It takes plain mappings and returns either a `DependencyGraph` with sorted layers or a `GraphProblems` listing everything wrong at once, in the same `X | Y` return style as `plan_stop`. It holds no CLI codes: problems carry a structural `kind` and the command that builds the graph maps those to the codes a user sees, so the graph rules stay testable without the command vocabulary. Tarjan's algorithm is written iteratively because a deeply chained Compose file must produce a refusal rather than a `RecursionError`. `up` builds the graph before it starts anything, and only when it is going to wait: with `--no-wait` there is no ordering to get wrong and no graph is needed.
 
 ## Adapter boundary
 
