@@ -41,7 +41,7 @@ RUNNING_STATES = frozenset({"running"})
 EXITED_STATE = "exited"
 STOPPED_STATES = frozenset({"exited", "created", "paused", "dead", "removing", "restarting"})
 
-READINESS_LABELS: dict[Readiness, str] = {
+READINESS_LABELS: Mapping[Readiness, str] = {
     "ready": "ready",
     "running": "running (readiness unverified)",
     "starting": "starting",
@@ -77,7 +77,7 @@ class SourceResult:
 # Docker, so it is classified against this set rather than repeated: every
 # other source in a report draws its wording from a fixed vocabulary, and this
 # one must not be the exception that puts runtime text on the terminal.
-HEALTH_DETAIL: dict[str, str] = {
+HEALTH_DETAIL: Mapping[str, str] = {
     "healthy": "reports healthy",
     "unhealthy": "reports unhealthy",
     "starting": "reports starting",

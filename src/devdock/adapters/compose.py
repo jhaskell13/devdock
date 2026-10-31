@@ -16,6 +16,12 @@ from pathlib import Path
 from typing import IO
 
 from devdock.adapters.base import (
+    CONFIG_FILES_LABEL,
+    ONEOFF_LABEL,
+    PROJECT_LABEL,
+    SAFE_PROJECT_NAME,
+    SERVICE_LABEL,
+    WORKING_DIR_LABEL,
     CommandCancelled,
     CommandResult,
     CommandRunner,
@@ -34,6 +40,7 @@ from devdock.adapters.base import (
     ServiceObservations,
 )
 from devdock.cancellation import CancelToken
+from devdock.config import SERVICE_NAME
 
 VERSION_TIMEOUT = 5.0
 DAEMON_TIMEOUT = 5.0
@@ -42,7 +49,6 @@ LIST_TIMEOUT = 10.0
 START_TIMEOUT = 300.0
 STOP_TIMEOUT = 120.0
 
-PROJECT_LABEL = "com.docker.compose.project"
 _FIELD_SEPARATOR = "\t"
 
 
@@ -66,20 +72,15 @@ _CONTAINER_FORMAT = _FIELD_SEPARATOR.join(
         ".Names",
         ".State",
         f'.Label "{PROJECT_LABEL}"',
-        '.Label "com.docker.compose.project.working_dir"',
-        '.Label "com.docker.compose.project.config_files"',
-        '.Label "com.docker.compose.service"',
-        '.Label "com.docker.compose.oneoff"',
+        f'.Label "{WORKING_DIR_LABEL}"',
+        f'.Label "{CONFIG_FILES_LABEL}"',
+        f'.Label "{SERVICE_LABEL}"',
+        f'.Label "{ONEOFF_LABEL}"',
     )
 )
 _CONTAINER_FIELD_COUNT = 8
 _NETWORK_FORMAT = _FIELD_SEPARATOR.join((_json_field(".ID"), _json_field(".Name")))
 _VOLUME_FORMAT = _json_field(".Name")
-# Compose-safe project names: also inert inside --filter expressions, so this
-# is the single rule that ownership.py derives names against and the adapter
-# re-checks before every invocation.
-SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-
 # Compose reads COMPOSE_* settings from the project's .env, which DevDock treats
 # as untrusted. Shell environment beats .env in Compose's precedence, so pinning
 # these here keeps the preview truthful regardless of what .env says.
@@ -212,6 +213,11 @@ def run_command(
     """
 
     arguments = list(args)
+    if cancel is not None and cancel.cancelled:
+        # Nothing has been started yet, so there is nothing to clean up and no
+        # reason to begin. Checking only once the child is running made the
+        # outcome depend on whether it happened to exit inside one poll.
+        raise CommandCancelled()
     isolation = process_isolation()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         # Temporary files rather than pipes: the child can write as much as it
@@ -454,7 +460,7 @@ class ComposeAdapter:
             return OperationOutcome("unavailable")
         names = [str(name) for name in services]
         for name in names:
-            if not COMPOSE_SERVICE_NAME.fullmatch(name):
+            if not SERVICE_NAME.fullmatch(name):
                 raise ValueError("service name is not safe to pass as an argument")
         args = self._project_args(
             executable, project_name, project_root, compose_file, max_parallel=max_parallel
@@ -667,14 +673,6 @@ class ComposeAdapter:
 # by an unbounded parse of a document DevDock wants four fields from.
 MAX_CONFIG_CHARACTERS = 4_000_000
 
-# Compose's own service-name shape. Its schema already enforces this, so a name
-# that fails here means the output did not come from a Compose that DevDock
-# understands. Names are not quoted when rejected: an unexpected name is
-# exactly the value least safe to echo. A name legal here can still begin with
-# a character that argv would read as an option, which is re-checked where
-# names become command arguments rather than assumed here.
-COMPOSE_SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]{1,63}$")
-
 # What Compose's schema accepts today. A condition outside this set means a
 # newer Compose, not a malformed file, and DevDock must not guess at ordering
 # it does not understand.
@@ -724,7 +722,7 @@ def _parse_dependencies(text: str) -> DeclaredDependencies:
     names: list[str] = []
     rejected = 0
     for name in raw_services:
-        if isinstance(name, str) and COMPOSE_SERVICE_NAME.fullmatch(name):
+        if isinstance(name, str) and SERVICE_NAME.fullmatch(name):
             names.append(name)
         else:
             rejected += 1
@@ -798,14 +796,14 @@ def _parse_depends_on(service: str, raw: object) -> tuple[list[DeclaredDependenc
     edges: list[DeclaredDependency] = []
     if isinstance(raw, list):
         for target in raw:
-            if not isinstance(target, str) or not COMPOSE_SERVICE_NAME.fullmatch(target):
+            if not isinstance(target, str) or not SERVICE_NAME.fullmatch(target):
                 return [], _unrecognized_dependency(service)
             edges.append(DeclaredDependency(service, target, "service_started"))
         return edges, None
     if not isinstance(raw, dict):
         return [], _unrecognized_dependency(service)
     for target, settings in raw.items():
-        if not isinstance(target, str) or not COMPOSE_SERVICE_NAME.fullmatch(target):
+        if not isinstance(target, str) or not SERVICE_NAME.fullmatch(target):
             return [], _unrecognized_dependency(service)
         condition = "service_started"
         required = True

@@ -207,15 +207,32 @@ def test_a_timeout_carries_whatever_was_written_before_it() -> None:
 # --- cancellation -------------------------------------------------------
 
 
-def test_a_token_set_before_the_command_still_runs_it_once() -> None:
-    """Cancellation is checked while waiting; a quick command simply finishes."""
+def test_a_token_already_set_starts_no_process_at_all() -> None:
+    """Whether a command runs must not depend on how fast it happens to exit.
+
+    Checking only once the child was running made this a race: a quick
+    command finished inside the first poll and a slow one did not, so the
+    same call could either run or be cancelled.
+    """
 
     token = CancelToken()
     token.cancel()
+    started: list[int] = []
+    real_popen = subprocess.Popen
 
-    result = run_command(python("import sys; sys.stdout.write('done')"), timeout=30, cancel=token)
+    class Recording(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            started.append(self.pid)
 
-    assert result.stdout == "done"
+    subprocess.Popen = Recording  # type: ignore[misc]
+    try:
+        with pytest.raises(CommandCancelled):
+            run_command(python("import sys; sys.stdout.write('done')"), timeout=30, cancel=token)
+    finally:
+        subprocess.Popen = real_popen  # type: ignore[misc]
+
+    assert started == []
 
 
 def test_cancelling_a_running_command_stops_it_promptly() -> None:
@@ -332,9 +349,18 @@ def test_an_interrupt_during_a_command_does_not_leave_the_child_running() -> Non
             recorded.append(self.pid)
 
     class Exploding(CancelToken):
+        """Quiet until the child exists, then raises the way a handler would."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.asked = 0
+
         @property
         def cancelled(self) -> bool:
-            raise SystemExit(130)
+            self.asked += 1
+            if self.asked > 1:
+                raise SystemExit(130)
+            return False
 
     subprocess.Popen = Recording  # type: ignore[misc]
     try:

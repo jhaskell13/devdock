@@ -912,7 +912,7 @@ def test_an_unprintable_condition_is_described_rather_than_echoed(tmp_path: Path
     assert declared.dependencies == ()
 
 
-@pytest.mark.parametrize("name", ["bad name", "web\nservice", "a" * 64, "sql\x1b[2J", "", "üñî"])
+@pytest.mark.parametrize("name", ["bad name", "web\nservice", "sql\x1b[2J", "", "üñî"])
 def test_service_names_compose_could_not_have_produced_are_refused(
     tmp_path: Path, name: str
 ) -> None:
@@ -1066,12 +1066,20 @@ def test_no_parallel_limit_means_no_flag() -> None:
     assert "--parallel" not in _start()
 
 
-@pytest.mark.parametrize("name", ["bad name", "web;rm -rf /", "a" * 64, "web\nservice", ""])
+@pytest.mark.parametrize("name", ["bad name", "web;rm -rf /", "web\nservice", ""])
 def test_a_service_name_that_is_not_argv_safe_is_refused(name: str) -> None:
     """The separator makes a leading dash inert; this refuses the rest."""
 
     with pytest.raises(ValueError, match="not safe"):
         _start(services=(name,))
+
+
+def test_a_name_longer_than_63_characters_is_accepted() -> None:
+    """Compose has no length limit, and an invented one broke real projects."""
+
+    long_name = "a" * 80
+
+    assert _start(services=(long_name,))[-1] == long_name
 
 
 def test_a_leading_dash_is_allowed_because_the_separator_makes_it_inert() -> None:

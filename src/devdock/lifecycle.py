@@ -14,13 +14,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from devdock.adapters import (
+    START_TIMEOUT,
+    STOP_TIMEOUT,
     ComposeAdapter,
     ContainerRecord,
     NetworkRecord,
     OperationOutcome,
     RuntimeAdapter,
+    inspect_command,
 )
-from devdock.adapters.compose import PROJECT_LABEL, START_TIMEOUT, STOP_TIMEOUT
 from devdock.cancellation import CancelToken
 from devdock.config import DependencyCondition, ProjectProfile
 from devdock.diagnostics import Finding, check_profile
@@ -131,7 +133,7 @@ def _gates(
 
 
 def _inspect_hint(scope: OwnershipScope) -> str:
-    return f"Inspect with: docker ps -a --filter label={PROJECT_LABEL}={scope.project_name}"
+    return f"Inspect with: {inspect_command(scope.project_name)}"
 
 
 def start_project(
@@ -227,12 +229,18 @@ def start_project(
             no_deps=planned.ordered,
             max_parallel=max_parallel,
         )
+        failed = _start_failure(outcome, scope, env, show_output, timeout, services)
+        if failed is not None:
+            # Its output belongs to the failure, which renders it with the
+            # context that explains it. Keeping a copy here too printed it
+            # twice under --show-output.
+            return failed
         captured.extend(
             _render_output(
                 outcome.raw_stdout, outcome.raw_stderr, env, show_output, on_success=True
             )
         )
-        return _start_failure(outcome, scope, env, show_output, timeout, services)
+        return None
 
     staged = wait and stage
 
@@ -645,14 +653,14 @@ _GRAPH_PROBLEM_ORDER: tuple[GraphProblemKind, ...] = (
     "undeclared_dependency",
     "healthcheck_missing",
 )
-_GRAPH_PROBLEM_CODES: dict[GraphProblemKind, str] = {
+_GRAPH_PROBLEM_CODES: Mapping[GraphProblemKind, str] = {
     "cycle": "_DEPENDENCY_CYCLE",
     "conflicting_conditions": "_DEPENDENCY_CONFLICT",
     "undeclared_service": "_SERVICE_UNDECLARED",
     "undeclared_dependency": "_DEPENDENCY_UNDECLARED",
     "healthcheck_missing": "_DEPENDENCY_UNHEALTHCHECKED",
 }
-_GRAPH_PROBLEM_REMEDIES: dict[GraphProblemKind, str] = {
+_GRAPH_PROBLEM_REMEDIES: Mapping[GraphProblemKind, str] = {
     "cycle": "Break the cycle shown above, then retry.",
     "conflicting_conditions": "Remove or correct one of the two declarations, then retry.",
     "undeclared_service": "Correct the service name in devdock.yaml, or add it to the "
@@ -663,7 +671,7 @@ _GRAPH_PROBLEM_REMEDIES: dict[GraphProblemKind, str] = {
 }
 
 # Outcome of a wait, as a code suffix shared by `up` and `wait`.
-_WAIT_CODES: dict[WaitStatus, str] = {
+_WAIT_CODES: Mapping[WaitStatus, str] = {
     "ready": "_READY",
     "unverified": "_READY_UNVERIFIED",
     "timed_out": "_READINESS_TIMEOUT",
@@ -675,13 +683,18 @@ _WAIT_CODES: dict[WaitStatus, str] = {
     "cancelled": "_INTERRUPTED",
     "unobservable": "_RUNTIME_UNOBSERVABLE",
 }
-_WAIT_REMEDIES: dict[WaitStatus, str] = {
+# Everything the user should *do* lives here. The engine reports only what it
+# observed, so that it needs no opinion about DevDock's flags or Docker's
+# commands, and so the same advice is not printed twice in two wordings.
+_WAIT_REMEDIES: Mapping[WaitStatus, str] = {
+    "unverified": "Add a healthcheck to the Compose file, or a readiness probe under "
+    "services in devdock.yaml, to the services named above.",
     "timed_out": "Raise --ready-timeout if the service is simply slow, or inspect it with "
     "'docker compose logs'.",
     "deadline_exceeded": "Raise --deadline, or run 'devdock status' to see what is outstanding.",
     "failed": "Inspect the service with 'docker compose logs', correct it, then retry.",
-    "regressed": "Inspect the service with 'docker compose logs'. The project is still "
-    "running; 'devdock status' shows its current state.",
+    "regressed": "Inspect the service with 'docker compose logs'. 'devdock status' shows "
+    "the project's current state.",
     "unstable": "Inspect the service with 'docker compose logs'. A health check that is too "
     "strict and a service that restarts under load both look like this.",
     "unsatisfiable": "Correct the dependency condition in devdock.yaml or the Compose file, "
@@ -883,6 +896,8 @@ def _wait_result(
 ) -> LifecycleResult:
     """Turn an engine outcome into the command's code, text, and exit behavior."""
 
+    if outcome.launch_failure is not None:  # pragma: no cover - callers handle this first
+        raise ValueError("a launch failure carries its own code and must be reported by the caller")
     return LifecycleResult(
         f"{prefix}{_WAIT_CODES[outcome.status]}",
         outcome.ok,

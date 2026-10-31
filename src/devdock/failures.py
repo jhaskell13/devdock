@@ -14,6 +14,7 @@ containment has no backtracking behavior to exploit.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -180,7 +181,7 @@ _MARKERS: tuple[tuple[FailureKind, tuple[str, ...]], ...] = (
     ),
 )
 
-_SUFFIX: dict[FailureKind, str] = {
+_SUFFIX: Mapping[FailureKind, str] = {
     "permission_denied": "PERMISSION_DENIED",
     "daemon_unavailable": "DAEMON_UNAVAILABLE",
     "config_invalid": "CONFIG_INVALID",
@@ -195,7 +196,7 @@ _SUFFIX: dict[FailureKind, str] = {
     "unknown": "FAILED",
 }
 
-_SUMMARY: dict[FailureKind, str] = {
+_SUMMARY: Mapping[FailureKind, str] = {
     "permission_denied": "Docker refused the connection for this user.",
     "daemon_unavailable": "The Docker daemon stopped responding during the operation.",
     "config_invalid": "The Compose configuration was rejected as invalid.",
@@ -210,7 +211,7 @@ _SUMMARY: dict[FailureKind, str] = {
     "unknown": "The runtime reported an error DevDock does not recognize.",
 }
 
-_REMEDY: dict[FailureKind, str] = {
+_REMEDY: Mapping[FailureKind, str] = {
     "permission_denied": PERMISSION_DENIED_REMEDY,
     "daemon_unavailable": "Start Docker Desktop or the Docker Engine service, confirm with "
     "'devdock check', then retry.",

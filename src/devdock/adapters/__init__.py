@@ -1,6 +1,12 @@
 """Runtime adapters that isolate local tool invocation from command handlers."""
 
 from devdock.adapters.base import (
+    CONFIG_FILES_LABEL,
+    ONEOFF_LABEL,
+    PROJECT_LABEL,
+    SAFE_PROJECT_NAME,
+    SERVICE_LABEL,
+    WORKING_DIR_LABEL,
     CommandResult,
     CommandRunner,
     ComposeCapabilities,
@@ -16,10 +22,24 @@ from devdock.adapters.base import (
     RuntimeAdapter,
     ServiceObservation,
     ServiceObservations,
+    inspect_command,
 )
-from devdock.adapters.compose import ComposeAdapter, run_command
+from devdock.adapters.compose import (
+    START_TIMEOUT,
+    STOP_TIMEOUT,
+    ComposeAdapter,
+    run_command,
+)
 
 __all__ = [
+    "CONFIG_FILES_LABEL",
+    "ONEOFF_LABEL",
+    "PROJECT_LABEL",
+    "SAFE_PROJECT_NAME",
+    "SERVICE_LABEL",
+    "START_TIMEOUT",
+    "STOP_TIMEOUT",
+    "WORKING_DIR_LABEL",
     "CommandResult",
     "CommandRunner",
     "ComposeAdapter",
@@ -36,5 +56,6 @@ __all__ = [
     "ServiceObservation",
     "ServiceObservations",
     "OperationOutcome",
+    "inspect_command",
     "run_command",
 ]

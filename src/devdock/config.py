@@ -8,15 +8,18 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-# Compose's own service-name shape. A narrower rule here would reject projects
-# that Compose accepts, and a profile that cannot name a service it must
-# configure is worse than a permissive pattern: this rule exists to keep
-# unprintable and structure-breaking names out, not to second-guess Compose.
-# The length cap keeps a name usable as a DNS label, which is what Compose
-# makes of it on the project network. A name legal here can still begin with a
-# character argv would read as an option; that is re-checked where names become
-# command arguments, in the same way the derived project name is.
-SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]{1,63}$")
+# Compose's own service-name shape, exactly. Any name Compose accepts, DevDock
+# accepts: a narrower rule rejects projects that run, and DevDock refusing a
+# project Compose is happy with is a bug rather than a safeguard. There is
+# deliberately no length limit -- Compose imposes none, and an earlier cap of
+# 63 characters made `up` fail on a project real Compose starts.
+#
+# What the rule does buy is that a name cannot contain whitespace, control
+# characters, or anything that would break DevDock's line-oriented output. A
+# name legal here can still begin with a character argv would read as an
+# option; that is handled where names become command arguments, by the `--`
+# separator, not by rejecting the project.
+SERVICE_NAME = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 PROBE_TIMEOUT_SECONDS = 2.0
 MAX_PROBE_TIMEOUT_SECONDS = 60.0

@@ -30,8 +30,10 @@ CODE_PREFIXES = (
 LIFECYCLE_PREFIXES = ("UP", "STATUS", "DOWN", "WAIT")
 LITERAL = re.compile(r"\b((?:" + "|".join(CODE_PREFIXES) + r")_[A-Z][A-Z_]+)\b")
 GATE_SUFFIX = re.compile(r"^_[A-Z][A-Z_]+$")
-# Upper-case identifiers in source that are environment variables, not codes.
+# Upper-case identifiers that appear as string literals in source -- in an
+# __all__ list, or as an environment variable name -- but are not codes.
 NOT_CODES = {
+    "PROJECT_LABEL",
     "COMPOSE_ANSI",
     "COMPOSE_PROGRESS",
     "COMPOSE_REMOVE_ORPHANS",
@@ -96,10 +98,13 @@ def test_every_emitted_code_is_documented_in_the_cli_contract() -> None:
 
 def test_the_code_table_does_not_list_codes_that_no_longer_exist() -> None:
     listed = set(re.findall(r"`((?:" + "|".join(CODE_PREFIXES) + r")_[A-Z_]+)`", CLI_DOC))
+    # Collected once. Called inside the comprehension it re-parsed every source
+    # file for every documented code, which grew into ten seconds of the suite.
+    emitted = emitted_codes()
     stale = sorted(
         code
         for code in listed
-        if code not in emitted_codes()
+        if code not in emitted
         and code not in {"DOCKER_HOST", "DOCKER_CONTEXT"}  # environment variables
     )
 

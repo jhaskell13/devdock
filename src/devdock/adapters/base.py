@@ -9,6 +9,7 @@ that implement them so the protocol never advertises unimplemented behavior.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,33 @@ class CommandRunner(Protocol):
         env: Mapping[str, str] | None = None,
         cancel: CancelToken | None = None,
     ) -> CommandResult: ...
+
+
+# The labels Compose writes on everything it creates. They are contract, not
+# implementation: ownership rules are expressed in them and the adapter's
+# queries read them back, so they belong where both can see them without the
+# pure-policy side importing the module that runs `docker`.
+PROJECT_LABEL = "com.docker.compose.project"
+WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
+CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
+SERVICE_LABEL = "com.docker.compose.service"
+ONEOFF_LABEL = "com.docker.compose.oneoff"
+
+# Compose-safe project names, which are also inert inside a --filter
+# expression. One rule, stated once: ownership derives names against it and
+# the adapter re-checks it before every invocation.
+SAFE_PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def inspect_command(project_name: str) -> str:
+    """The `docker ps` a user can run to see what DevDock is talking about.
+
+    Here rather than in the modules that print it: building a Docker command
+    line is adapter knowledge, and two separate callers were assembling the
+    same one by hand.
+    """
+
+    return f"docker ps -a --filter label={PROJECT_LABEL}={project_name}"
 
 
 ComposeCliState = Literal["missing", "unresponsive", "failed", "available"]

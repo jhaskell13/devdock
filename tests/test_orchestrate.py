@@ -277,25 +277,59 @@ def test_a_diamond_waits_for_both_middle_services() -> None:
     assert outcome.status == "unverified"
 
 
-def test_an_optional_dependency_never_blocks() -> None:
-    """Compose only warns when one is unavailable, so waiting would be stricter."""
+def test_an_optional_dependency_still_orders_the_start() -> None:
+    """``required: false`` changes how an absent dependency is handled, not the order.
+
+    Compose starts it first either way, so skipping the edge made DevDock
+    print a startup order it then did not follow.
+    """
 
     graph = build_graph(
         ["cache", "web"],
-        {"web": {"cache": "service_started"}},
+        {"web": {"cache": "service_healthy"}},
         {},
         optional_edges=frozenset({("web", "cache")}),
     )
     assert isinstance(graph, DependencyGraph)
-    script = Script(Snapshot((status("cache", "missing"), status("web", sources=[health(True)]))))
+    script = Script(
+        Snapshot((status("cache", "starting", sources=[health(False)]), status("web", "running"))),
+        Snapshot((status("cache", sources=[health(True)]), status("web", "running"))),
+    )
 
-    outcome, _ = run(graph, script, ready_timeout=10)
+    outcome, _ = run(graph, script, ready_timeout=30)
 
-    # cache itself never arrives, so the wait still ends on its budget, but
-    # web was never held back by it.
+    assert outcome.status == "unverified"
     web = next(item for item in outcome.progress if item.service == "web")
-    assert web.blocked_by == ()
-    assert web.reached_success
+    assert web.unblocked_at is not None and web.unblocked_at > 0, "web waited for cache"
+
+
+def test_an_optional_dependency_that_cannot_be_met_is_given_up_on() -> None:
+    """Compose "only warns"; DevDock goes ahead rather than spending the budget."""
+
+    graph = build_graph(
+        ["cache", "web"],
+        {"web": {"cache": "service_healthy"}},
+        {},
+        optional_edges=frozenset({("web", "cache")}),
+    )
+    assert isinstance(graph, DependencyGraph)
+    # cache runs but reports no health at all, so service_healthy can never
+    # be met for it. A required edge would refuse; an optional one proceeds.
+    script = Script(Snapshot((status("cache", "running"), status("web", sources=[health(True)]))))
+
+    outcome, clock = run(graph, script, ready_timeout=120, deadline=600)
+
+    assert outcome.status == "unverified"
+    assert clock.time < 120, "it must not wait out the budget for an optional dependency"
+
+
+def test_a_required_dependency_that_cannot_be_met_still_refuses() -> None:
+    graph = graph_for(["cache", "web"], {"web": {"cache": "service_healthy"}})
+    script = Script(Snapshot((status("cache", "running"), status("web", sources=[health(True)]))))
+
+    outcome, _ = run(graph, script, ready_timeout=120, deadline=600)
+
+    assert outcome.status == "unsatisfiable"
 
 
 @pytest.mark.parametrize(
@@ -945,3 +979,96 @@ def test_a_declared_ready_edge_does_not_drop_a_health_requirement() -> None:
 
     assert outcome.status == "unsatisfiable"
     assert any("reports no health status" in line for line in outcome.detail)
+
+
+# --- regressions found by the project audit -------------------------------
+
+
+def test_the_time_a_launch_takes_is_not_charged_to_the_service_it_started() -> None:
+    """A cold image pull once timed out a container that had existed 0.2s.
+
+    The service's budget must start when it has been *asked* to start, not
+    when it became eligible: starting it is the launcher's work, and that
+    work can take minutes.
+    """
+
+    clock = FakeClock()
+    launched: list[float] = []
+
+    def slow_launcher(batch: tuple[str, ...]) -> None:
+        clock.time += 90.0  # an image pull
+        launched.append(clock.time)
+        return None
+
+    def observe() -> Snapshot:
+        ready = bool(launched) and clock.time - launched[0] >= 3.0
+        return Snapshot((status("db", "ready" if ready else "starting", sources=[health(ready)]),))
+
+    outcome = wait_for_ready(
+        graph_for(["db"]),
+        observe,
+        clock=clock,
+        launcher=slow_launcher,  # type: ignore[arg-type]
+        ready_timeout=60,
+        deadline=600,
+    )
+
+    assert outcome.status == "ready", outcome.explain()
+
+
+def test_the_global_deadline_is_enforced_across_launches() -> None:
+    """Launching is where the time goes, so the check cannot skip those passes."""
+
+    clock = FakeClock()
+
+    def slow_launcher(batch: tuple[str, ...]) -> None:
+        clock.time += 50.0
+        return None
+
+    def observe() -> Snapshot:
+        return Snapshot(
+            tuple(status(name, "starting", sources=[health(False)]) for name in ("a", "b", "c"))
+        )
+
+    graph = graph_for(
+        ["a", "b", "c"], {"b": {"a": "service_healthy"}, "c": {"b": "service_healthy"}}
+    )
+    outcome = wait_for_ready(
+        graph,
+        observe,
+        clock=clock,
+        launcher=slow_launcher,  # type: ignore[arg-type]
+        ready_timeout=600,
+        deadline=60,
+    )
+
+    assert outcome.status == "deadline_exceeded"
+    assert clock.time < 200, "the deadline must not be overshot by a whole layer's launch"
+
+
+def test_a_service_is_only_as_ready_as_its_least_ready_replica() -> None:
+    """One healthy replica must not speak for two broken ones."""
+
+    script = Script(
+        Snapshot(
+            (
+                status("web", "unhealthy", sources=[health(False)]),
+                status("web", "unhealthy", sources=[health(False)]),
+                status("web", "ready", sources=[health(True)]),
+            )
+        )
+    )
+
+    outcome, _ = run(graph_for(["web"]), script, ready_timeout=5, deadline=60)
+
+    assert outcome.status == "timed_out", "a two-thirds-down service is not ready"
+
+
+def test_replicas_that_all_agree_are_ready() -> None:
+    script = Script(
+        Snapshot(tuple(status("web", "ready", sources=[health(True)]) for _ in range(3)))
+    )
+
+    outcome, _ = run(graph_for(["web"]), script)
+
+    assert outcome.status == "ready"

@@ -36,7 +36,7 @@ GraphProblemKind = Literal[
 # strictest. ``service_completed_successfully`` is deliberately absent: it is
 # not a point on this axis but a separate requirement that the service has
 # already exited, so it is merged by the rules in ``_merge_conditions``.
-_LIVENESS_RANK: dict[DependencyCondition, int] = {
+_LIVENESS_RANK: Mapping[DependencyCondition, int] = {
     "service_started": 0,
     "service_healthy": 1,
     "service_ready": 2,

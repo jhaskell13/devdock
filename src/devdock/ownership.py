@@ -20,8 +20,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from devdock.adapters.base import ContainerRecord, NetworkRecord, ResourceInventory
-from devdock.adapters.compose import PROJECT_LABEL, SAFE_PROJECT_NAME
+from devdock.adapters.base import (
+    PROJECT_LABEL,
+    SAFE_PROJECT_NAME,
+    SERVICE_LABEL,
+    ContainerRecord,
+    NetworkRecord,
+    ResourceInventory,
+    inspect_command,
+)
 from devdock.config import ProjectProfile
 from devdock.discovery import COMPOSE_NAMES
 
@@ -29,10 +36,6 @@ NAME_PREFIX = "devdock"
 ROOT_DIGEST_LENGTH = 12
 SLUG_MAX_LENGTH = 40
 _SLUG_SEPARATORS = re.compile(r"[^a-z0-9]+")
-WORKING_DIR_LABEL = "com.docker.compose.project.working_dir"
-CONFIG_FILES_LABEL = "com.docker.compose.project.config_files"
-SERVICE_LABEL = "com.docker.compose.service"
-ONEOFF_LABEL = "com.docker.compose.oneoff"
 
 ConflictKind = Literal["mismatched", "oneoff", "unlabeled", "unparseable", "inconsistent"]
 
@@ -230,10 +233,7 @@ class OwnershipAssessment:
             for conflict in self.conflicts:
                 lines.append(f"  {conflict.name} ({conflict.kind})")
                 lines.extend(f"    {reason}" for reason in conflict.reasons)
-            lines.append(
-                "Inspect them with: docker ps -a --filter "
-                f"label={PROJECT_LABEL}={self.scope.project_name}"
-            )
+            lines.append(f"Inspect them with: {inspect_command(self.scope.project_name)}")
             lines.append(
                 "If they belong to an earlier configuration of this project, stop them with "
                 "the configuration that created them, then retry."

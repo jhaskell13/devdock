@@ -16,6 +16,7 @@ starts, flapping, and deadlines be tested in milliseconds.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -46,7 +47,7 @@ WaitStatus = Literal[
 # A Compose health check has already applied its own retries, so one report is
 # enough. A probe has none: an accept during a crash loop can succeed once, so
 # a second sample is required to call it stable.
-REQUIRED_SUCCESSES: dict[ReadinessSource, int] = {"compose_health": 1, "tcp": 2, "http": 2}
+REQUIRED_SUCCESSES: Mapping[ReadinessSource, int] = {"compose_health": 1, "tcp": 2, "http": 2}
 
 DEFAULT_READY_TIMEOUT = 60.0
 DEFAULT_DEADLINE = 300.0
@@ -298,6 +299,39 @@ def condition_unsatisfiable(
     return None
 
 
+# How far from settled each class is. Used to pick which replica speaks for a
+# service: the least ready one does, so a service with three containers is
+# ready only when all three are.
+_READINESS_SEVERITY: Mapping[str, int] = {
+    "ready": 0,
+    "exited_ok": 1,
+    "running": 2,
+    "starting": 3,
+    "unhealthy": 4,
+    "stopped": 5,
+    "unknown": 6,
+    "missing": 7,
+}
+
+
+def _per_service(statuses: Sequence[ServiceStatus]) -> dict[str, ServiceStatus]:
+    """Reduce one status per container to one per service, worst case winning.
+
+    A replicated service has a container each, and keeping whichever arrived
+    last would let one healthy replica speak for two broken ones -- `status`
+    would show them and `up` would call the project ready.
+    """
+
+    worst: dict[str, ServiceStatus] = {}
+    for status in statuses:
+        current = worst.get(status.service)
+        if current is None or _READINESS_SEVERITY.get(
+            status.readiness, 0
+        ) > _READINESS_SEVERITY.get(current.readiness, 0):
+            worst[status.service] = status
+    return worst
+
+
 def _apply(item: ServiceProgress, status: ServiceStatus, now: float, require_ready: bool) -> None:
     """Fold one observation into a service's running history."""
 
@@ -386,18 +420,37 @@ def _regression(item: ServiceProgress) -> str | None:
     return None
 
 
-def _blocking(graph: DependencyGraph, service: str, tracker: _Tracker) -> tuple[Dependency, ...]:
-    """Required dependencies of ``service`` that do not yet meet their condition.
+def _blocking(
+    graph: DependencyGraph, service: str, tracker: _Tracker, now: float
+) -> tuple[Dependency, ...]:
+    """Dependencies of ``service`` that do not yet meet their condition.
 
-    An optional dependency never blocks. Compose only warns when one is
-    unavailable, so waiting on it would be stricter than the project asked.
+    Optional dependencies order the start like any other, because that is what
+    Compose does with them: ``required: false`` changes how an unavailable
+    dependency is *handled*, not whether it is started first. Skipping them
+    entirely meant DevDock printed a startup order it then did not follow, and
+    told Compose not to follow it either.
+
+    What ``required: false`` does change is the giving-up point. An optional
+    dependency whose condition can no longer be met stops blocking, so the
+    service waiting on it goes ahead rather than waiting out its budget --
+    Compose's "only warns you that the dependency isn't available".
     """
 
-    return tuple(
-        edge
-        for edge in graph.dependencies_of(service)
-        if edge.required and not edge_met(edge, tracker.for_service(edge.depends_on))
-    )
+    blocking: list[Dependency] = []
+    for edge in graph.dependencies_of(service):
+        target = tracker.for_service(edge.depends_on)
+        if edge_met(edge, target):
+            continue
+        if not edge.required and condition_unsatisfiable(
+            edge.condition,
+            target,
+            now,
+            requires_health=edge.requires_health or edge.condition == "service_healthy",
+        ):
+            continue
+        blocking.append(edge)
+    return tuple(blocking)
 
 
 def wait_for_ready(
@@ -436,10 +489,7 @@ def wait_for_ready(
             return _outcome(
                 "cancelled",
                 "Interrupted while waiting for services to become ready.",
-                (
-                    "Nothing was stopped or removed. Run 'devdock status' to see where the "
-                    "project got to, or 'devdock down' to stop it.",
-                ),
+                ("Nothing was stopped or removed.",),
                 tracker=tracker,
                 elapsed=ticker.now() - started,
             )
@@ -459,7 +509,7 @@ def wait_for_ready(
                 )
         else:
             errors = 0
-            observed = {status.service: status for status in snapshot.services}
+            observed = _per_service(snapshot.services)
             for name in graph.nodes:
                 item = tracker.for_service(name)
                 status = observed.get(name)
@@ -474,14 +524,19 @@ def wait_for_ready(
                     launched.update(batch)
                     failure = launcher(batch)
                     now = ticker.now() - started
+                    # The budget starts once a service has been *asked* to
+                    # start, not when it became eligible to be. Starting it is
+                    # the launcher's call, which includes image pulls and can
+                    # take minutes; charging that to the service meant a cold
+                    # pull timed out a container that had existed for a
+                    # fraction of a second.
+                    for name in batch:
+                        tracker.for_service(name).unblocked_at = now
                     if token.cancelled:
                         return _outcome(
                             "cancelled",
                             "Interrupted while starting services.",
-                            (
-                                "Some services may have been started. Nothing was removed. "
-                                "Run 'devdock status' to see what exists.",
-                            ),
+                            ("Some services may have been started. Nothing was removed.",),
                             tracker=tracker,
                             elapsed=now,
                         )
@@ -495,7 +550,13 @@ def wait_for_ready(
                             launch_failure=failure,
                         )
                     # Judged on the next pass, once the runtime has been asked
-                    # what the new containers are actually doing.
+                    # what the new containers are actually doing. The deadline
+                    # is still checked here: launching is where the time goes,
+                    # so skipping the check on these passes let an N-layer
+                    # project overshoot it by the whole of its own start.
+                    overran = _expired(graph, tracker, now, ready_timeout, deadline, require_ready)
+                    if overran is not None:
+                        return _outcome(*overran, tracker=tracker, elapsed=now)
                     ticker.sleep(interval)
                     continue
 
@@ -521,7 +582,7 @@ def _refresh(graph: DependencyGraph, tracker: _Tracker, now: float) -> None:
 
     for name in graph.nodes:
         item = tracker.for_service(name)
-        item.blocked_by = _blocking(graph, name, tracker)
+        item.blocked_by = _blocking(graph, name, tracker, now)
 
         # The service's own clock starts the first time nothing is holding it
         # back, whether or not its container exists yet, and then keeps
@@ -575,6 +636,8 @@ def _evaluate(
         item = tracker.for_service(name)
 
         for edge in item.blocked_by:
+            if not edge.required:
+                continue  # an optional edge gives up rather than refusing
             reason = condition_unsatisfiable(
                 edge.condition,
                 tracker.for_service(edge.depends_on),
@@ -615,8 +678,7 @@ def _evaluate(
         return (
             "regressed",
             "A service that had become ready did not stay that way.",
-            tuple(regressions)
-            + ("The project was left running. Run 'devdock status' to see its current state.",),
+            tuple(regressions) + ("The project was left running.",),
         )
     if impossible:
         return (
@@ -628,19 +690,13 @@ def _evaluate(
         return (
             "unstable",
             "A service became ready and did not stay that way.",
-            tuple(unstable)
-            + (
-                "The project was left running. Inspect the service with "
-                "'docker compose logs'; a health check that is too strict or a service that "
-                "restarts under load both look like this.",
-            ),
+            tuple(unstable) + ("The project was left running.",),
         )
     if failures:
         return (
             "failed",
             "A service failed before it became ready.",
-            tuple(failures)
-            + ("Inspect it with 'docker compose logs', correct the service, then retry.",),
+            tuple(failures),
         )
 
     pending = [
@@ -662,8 +718,6 @@ def _evaluate(
             (
                 f"{len(unverified)} service(s) have no readiness source, so DevDock can show "
                 "they are running but not that they are serving: " + ", ".join(sorted(unverified)),
-                "Add a healthcheck to the Compose file, or a readiness probe under services "
-                "in devdock.yaml.",
             ),
         )
     return ("ready", "All services are ready.", ())
@@ -698,8 +752,7 @@ def _expired(
             f"The whole startup exceeded its {deadline:g}s deadline.",
             (
                 unsettled,
-                "The project was left running. Raise --deadline, or run 'devdock status' to "
-                "see what it is waiting for.",
+                "The project was left running.",
             ),
         )
 
@@ -718,11 +771,7 @@ def _expired(
     return (
         "timed_out",
         f"{names} did not become ready within {ready_timeout:g}s.",
-        tuple(detail)
-        + (
-            "The project was left running. Raise --ready-timeout, or inspect the service "
-            "with 'docker compose logs'.",
-        ),
+        tuple(detail) + ("The project was left running.",),
     )
 
 
