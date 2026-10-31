@@ -19,10 +19,10 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 | Milestone | Result |
 | --- | --- |
-| 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. |
-| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. |
-| 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. |
-| 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. |
+| 0. Repository and CLI contract | Clear install/use docs, stable command behavior, versioned profile schema, baseline CI. **Complete.** |
+| 1. Discovery and diagnostics | Actionable, structured checks for files, runtimes, ports, configuration, and environment requirements. **Complete.** |
+| 2. Compose adapter and lifecycle | Safe `up`, `status`, and `down` for DevDock-managed Compose projects. **Complete.** |
+| 3. Readiness and dependency orchestration | Deterministic startup ordering, health/readiness waits, timeouts, and interruption handling. **Complete.** |
 | 4. State, recovery, and safe cleanup | Durable operation records and recovery from interrupted or partially failed lifecycle operations. |
 | 5. Drift and environment snapshots | Compare declared environment with captured local state and explain meaningful changes. |
 | 6. Profiles and runtime adapter expansion | Multiple named profiles and a tested adapter boundary for additional local runtimes. |
@@ -57,32 +57,38 @@ The plan includes implementation, design, code review, tests, documentation, pac
 
 ### 2. Docker Compose adapter and lifecycle
 
-- Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
-- Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
-- Define project-scoped resource naming/labels so DevDock can identify what it owns without claiming unrelated containers.
-- Implement `devdock up` with bounded execution, captured output, useful error summaries, and an option to show full runtime output.
-- Implement `devdock status` with per-service state, health, and relevant published ports.
-- Implement `devdock down` as a scoped stop operation with a preview of affected services.
-- Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations.
-- Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
-- Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
-- Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
-- Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects.
+**Status:** Complete, pending a first run of the gated suite on a machine with Docker. The adapter boundary, ownership model, `up`, `status`, `down`, and the failure taxonomy are implemented. Unit checks use fake runners and never need a daemon. A separately gated `docker`-marked suite exercises the real runtime with disposable resources, and `scripts/demo.py` runs the same ground as a readable walkthrough.
 
-**Acceptance:** A sample project can be started, queried, and stopped repeatedly; DevDock reports ownership scope before actions and leaves unrelated resources untouched.
+**Acceptance:** Met by the gated suite: a sample project starts, is queried, and stops repeatedly; ownership scope is printed before every action; an unrelated Compose project is verified untouched; a foreign container under DevDock's project name blocks action instead of being adopted; volumes survive teardown.
+
+- [x] Define an adapter interface for capability detection, configuration validation, start, status, stop, and resource identification.
+- [x] Implement a Compose adapter using argument arrays and subprocess APIs, never shell-string interpolation.
+- [x] Define project-scoped resource naming/labels so DevDock can identify what it owns without claiming unrelated containers.
+- [x] Implement `devdock up` with bounded execution, captured output, useful error summaries, and an option to show full runtime output.
+- [x] Implement `devdock status` with per-service state, health, and relevant published ports.
+- [x] Implement `devdock down` as a scoped stop operation with a preview of affected services.
+- [x] Decide which Compose options DevDock controls and which user options pass through; reject conflicting or unsafe combinations. (DevDock controls project name, directory, and file; nothing passes through in this version.)
+- [x] Preserve useful Compose output while redacting configured secrets and avoiding accidental environment dumps.
+- [x] Handle unavailable daemon, invalid Compose config, missing image, failed pull, port conflicts, and startup failures distinctly.
+- [x] Add disposable integration fixtures that create only local throwaway resources and clean up in `finally`/fixture teardown.
+- [x] Verify repeated `up` and `down` calls are idempotent and do not alter unrelated Compose projects.
+
 
 ### 3. Readiness and dependency orchestration
 
-- Model service dependencies from Compose definitions and explicit DevDock profile declarations.
-- Define readiness sources: Compose health status, TCP connection, HTTP response, and bounded custom checks that do not execute arbitrary untrusted commands by default.
-- Specify startup order, parallelism limits, readiness polling interval, per-service timeout, and global deadline.
-- Report which dependency is blocking a service and show the last useful health result.
-- Handle services with no health check and distinguish “running” from “ready”.
-- Define behavior when a dependency becomes unhealthy after startup.
-- Support cancellation on Ctrl+C and Windows console interruption; avoid orphaning child processes.
-- Ensure timeout and cancellation paths produce a recoverable operation state.
-- Test dependency graphs with cycles, missing nodes, diamond dependencies, slow starts, flapping health, and simultaneous failures.
-- Test wall-clock bounds with fake adapters and injected clocks rather than slow real sleeps.
+**Status:** Complete. `up` validates the dependency graph before mutating anything, starts the project one layer at a time, and waits; `wait` waits without starting. DevDock owns the ordering, so a blocked service is nameable and a timeout is attributable to the service that caused it.
+
+- [x] Model service dependencies from Compose definitions and explicit DevDock profile declarations.
+- [x] Define readiness sources: Compose health status, TCP connection, HTTP response, and bounded custom checks that do not execute arbitrary untrusted commands by default.
+- [x] Specify startup order, parallelism limits, readiness polling interval, per-service timeout, and global deadline.
+- [x] Start one dependency layer at a time so DevDock owns the ordering, with a concurrency limit.
+- [x] Report which dependency is blocking a service and show the last useful health result.
+- [x] Handle services with no health check and distinguish “running” from “ready”.
+- [x] Define behavior when a dependency becomes unhealthy after startup.
+- [x] Support cancellation on Ctrl+C and Windows console interruption; avoid orphaning child processes.
+- [x] Ensure timeout and cancellation paths produce a recoverable operation state.
+- [x] Test dependency graphs with cycles, missing nodes, diamond dependencies, slow starts, flapping health, and simultaneous failures.
+- [x] Test wall-clock bounds with fake adapters and injected clocks rather than slow real sleeps.
 
 **Acceptance:** Startup behavior is predictable for dependency graphs and remains bounded and explainable when a service never becomes ready or the user interrupts the command.
 

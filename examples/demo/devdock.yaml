@@ -1,0 +1,19 @@
+schema_version: 1
+project: devdock-demo
+runtimes:
+  docker: compose
+compose_file: compose.yaml
+required_files:
+  - compose.yaml
+ports:
+  - 18080
+services:
+  # The Compose health check already proves nginx answers inside its own
+  # container. This probe proves the published port answers from the host,
+  # which is the thing a developer actually needs, and the two are reported
+  # separately so it is clear which one passed.
+  web:
+    readiness:
+      - type: http
+        port: 18080
+        path: /

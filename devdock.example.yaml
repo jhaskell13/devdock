@@ -8,4 +8,19 @@ required_env: []
 required_files: []
 required_dirs: []
 ports: []
-
+# Dependencies give `up` and `wait` their startup order; readiness probes are
+# checked by `up`, `wait`, and `status`. Probes may only target loopback, and
+# the port is the one published on the host.
+services: {}
+#  web:
+#    depends_on:
+#      db: service_healthy
+#      migrate: service_completed_successfully
+#    readiness:
+#      - type: http
+#        port: 8080
+#        path: /healthz
+#  db:
+#    readiness:
+#      - type: tcp
+#        port: 5432

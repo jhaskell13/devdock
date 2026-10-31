@@ -1,0 +1,42 @@
+# A disposable sample project for demonstrating DevDock.
+#
+# Deliberately varied, so one `devdock up` shows every readiness class:
+#
+#   migrate  runs once and exits 0        -> "exited cleanly"
+#   web      has a health check and a      -> "ready", verified twice over
+#            published port to probe
+#   worker   has neither                   -> "running (readiness unverified)"
+#
+# The dependencies also give it a real startup order: nothing starts before
+# the migration has finished, and the worker waits for the web service to be
+# healthy. A named volume exists to show that `devdock down` preserves it.
+services:
+  migrate:
+    image: busybox:stable
+    command: ["sh", "-c", "echo 'migrating'; sleep 1; echo 'done'"]
+
+  web:
+    image: nginx:alpine
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "18080:80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+      interval: 1s
+      timeout: 2s
+      retries: 10
+      start_period: 1s
+
+  worker:
+    image: busybox:stable
+    depends_on:
+      web:
+        condition: service_healthy
+    command: ["sh", "-c", "while true; do sleep 5; done"]
+    volumes:
+      - work-data:/data
+
+volumes:
+  work-data:

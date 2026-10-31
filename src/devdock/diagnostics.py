@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import socket
-import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from devdock.adapters import ComposeAdapter, RuntimeAdapter
 from devdock.config import ProjectProfile
-from devdock.discovery import COMPOSE_NAMES
+from devdock.failures import PERMISSION_DENIED_REMEDY
 from devdock.metadata import read_python_metadata
+from devdock.ownership import compose_path_for, resolves_inside
 
 PYTHON_REQUIREMENT = re.compile(r"^>=\s*(\d+)\.(\d+)(?:\.(\d+))?$")
 Severity = Literal["PASS", "WARN", "FAIL", "SKIP"]
@@ -31,18 +31,6 @@ class Finding:
     evidence: tuple[str, ...] = ()
     remedy: str | None = None
     doc_ref: str | None = None
-
-    @property
-    def level(self) -> Severity:
-        """Compatibility name used by the current CLI renderer."""
-
-        return self.severity
-
-    @property
-    def message(self) -> str:
-        """Compatibility name used by callers expecting the old finding shape."""
-
-        return self.summary
 
 
 def _finding(
@@ -65,19 +53,6 @@ def _compose_skipped(code: str, check_name: str, reason: str) -> Finding:
     )
 
 
-def _compose_path(profile: ProjectProfile, root: Path) -> Path | None:
-    if profile.compose_file is not None:
-        return root / profile.compose_file
-    return next((root / name for name in COMPOSE_NAMES if (root / name).is_file()), None)
-
-
-def _inside_project(path: Path, root: Path) -> bool:
-    try:
-        return path.resolve().is_relative_to(root.resolve())
-    except (OSError, RuntimeError):
-        return False
-
-
 def _resolved_path(path: Path) -> Path | None:
     try:
         return path.resolve()
@@ -89,15 +64,69 @@ def _project_python_interpreters(root: Path) -> tuple[Path, ...]:
     """Return conventional local virtual-environment interpreter paths."""
 
     names = (".venv", "venv", "env")
-    candidates = [
-        root / environment / "Scripts" / "python.exe"
-        for environment in names
-    ]
+    candidates = [root / environment / "Scripts" / "python.exe" for environment in names]
     candidates.extend(root / environment / "bin" / "python" for environment in names)
     return tuple(Path(os.path.abspath(path)) for path in candidates)
 
 
-def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding]) -> None:
+def _check_compose_file(
+    profile: ProjectProfile, root: Path, findings: list[Finding]
+) -> Path | None:
+    """Report the Compose file's presence and containment; return it only when usable."""
+
+    compose_path = compose_path_for(profile, root)
+    docker_declared = "docker" in profile.runtimes
+    if compose_path is None:
+        if docker_declared:
+            findings.append(
+                _finding(
+                    "COMPOSE_FILE_MISSING",
+                    "FAIL",
+                    "No Compose file was configured or discovered.",
+                    remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
+                )
+            )
+        return None
+    if not resolves_inside(compose_path, root):
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_OUTSIDE_PROJECT",
+                "FAIL",
+                "Compose file does not resolve inside the selected project.",
+                evidence=(f"File: {compose_path}",),
+                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
+            )
+        )
+        return None
+    if not compose_path.is_file():
+        findings.append(
+            _finding(
+                "COMPOSE_FILE_MISSING",
+                "FAIL",
+                f"Compose file not found: {compose_path.name}",
+                evidence=(f"Expected path: {compose_path}",),
+                remedy="Create the file or update compose_file in devdock.yaml.",
+            )
+        )
+        return None
+    findings.append(
+        _finding(
+            "COMPOSE_FILE_FOUND",
+            "PASS",
+            f"Compose file found: {compose_path.name}",
+            evidence=(f"Path: {compose_path}",),
+        )
+    )
+    return compose_path
+
+
+def _check_compose(
+    profile: ProjectProfile,
+    root: Path,
+    findings: list[Finding],
+    adapter: RuntimeAdapter,
+    compose_path: Path | None,
+) -> None:
     requirement = profile.runtimes.get("docker")
     if requirement is None:
         return
@@ -119,41 +148,8 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
         )
         return
 
-    compose_path = _compose_path(profile, root)
-    compose_file_ready = False
-    if compose_path is None:
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                "No Compose file was configured or discovered.",
-                remedy="Set compose_file in devdock.yaml or add a common Compose filename.",
-            )
-        )
-    elif not _inside_project(compose_path, root):
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_OUTSIDE_PROJECT",
-                "FAIL",
-                "Compose file does not resolve inside the selected project.",
-                evidence=(f"File: {compose_path}",),
-                remedy="Remove the escaping symlink or choose a project-contained Compose file.",
-            )
-        )
-    elif not compose_path.is_file():
-        findings.append(
-            _finding(
-                "COMPOSE_FILE_MISSING",
-                "FAIL",
-                f"Compose file not found: {compose_path.name}",
-                evidence=(f"Expected path: {compose_path}",),
-                remedy="Create the file or update compose_file in devdock.yaml.",
-            )
-        )
-    else:
-        compose_file_ready = True
-
-    executable = shutil.which("docker")
+    capabilities = adapter.detect_capabilities()
+    executable = capabilities.executable
     if executable is None:
         findings.append(
             _finding(
@@ -175,46 +171,22 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
         )
         return
 
-    try:
-        version = subprocess.run(
-            [executable, "compose", "version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    if not capabilities.compose_available:
+        if capabilities.compose_cli == "unresponsive":
+            summary = "Could not query the Docker Compose plugin."
+            evidence: tuple[str, ...] = (f"Executable: {executable}",)
+        else:
+            summary = "Docker CLI is present but its Compose plugin did not respond successfully."
+            evidence = (
+                f"Executable: {executable}",
+                f"Exit code: {capabilities.compose_cli_returncode}",
+            )
         findings.append(
             _finding(
                 "COMPOSE_CLI_UNAVAILABLE",
                 "FAIL",
-                "Could not query the Docker Compose plugin.",
-                evidence=(f"Executable: {executable}",),
-                remedy="Install or enable the Docker Compose plugin, then retry.",
-            )
-        )
-        findings.append(
-            _compose_skipped(
-                "DOCKER_DAEMON_SKIPPED",
-                "Docker daemon check",
-                "The Compose CLI/plugin did not respond.",
-            )
-        )
-        findings.append(
-            _compose_skipped(
-                "COMPOSE_CONFIG_SKIPPED",
-                "Compose config check",
-                "The Compose CLI/plugin did not respond.",
-            )
-        )
-        return
-    if version.returncode:
-        findings.append(
-            _finding(
-                "COMPOSE_CLI_UNAVAILABLE",
-                "FAIL",
-                "Docker CLI is present but its Compose plugin did not respond successfully.",
-                evidence=(f"Executable: {executable}", f"Exit code: {version.returncode}"),
+                summary,
+                evidence=evidence,
                 remedy="Install or enable the Docker Compose plugin, then retry.",
             )
         )
@@ -242,17 +214,25 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
         )
     )
 
-    try:
-        daemon = subprocess.run(
-            [executable, "info", "--format", "{{.ServerVersion}}"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
+    if capabilities.daemon_available:
+        findings.append(
+            _finding(
+                "DOCKER_DAEMON_AVAILABLE",
+                "PASS",
+                "Docker daemon is reachable.",
+                evidence=("Docker version request returned a server version.",),
+            )
         )
-    except (OSError, subprocess.TimeoutExpired):
-        daemon = None
-    if daemon is None or daemon.returncode:
+    elif capabilities.daemon == "permission_denied":
+        findings.append(
+            _finding(
+                "DOCKER_DAEMON_PERMISSION_DENIED",
+                "FAIL",
+                "Docker CLI is available, but this user may not connect to the daemon.",
+                remedy=PERMISSION_DENIED_REMEDY,
+            )
+        )
+    else:
         findings.append(
             _finding(
                 "DOCKER_DAEMON_UNAVAILABLE",
@@ -261,17 +241,8 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 remedy="Start Docker Desktop or the Docker Engine service and retry.",
             )
         )
-    else:
-        findings.append(
-            _finding(
-                "DOCKER_DAEMON_AVAILABLE",
-                "PASS",
-                "Docker daemon is reachable.",
-                evidence=("Docker info request succeeded.",),
-            )
-        )
 
-    if not compose_file_ready or compose_path is None:
+    if compose_path is None:
         findings.append(
             _compose_skipped(
                 "COMPOSE_CONFIG_SKIPPED",
@@ -280,34 +251,8 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
             )
         )
         return
-    try:
-        parsed = subprocess.run(
-            [executable, "compose", "-f", str(compose_path), "config", "--quiet"],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        parsed = None
-    if parsed is None or parsed.returncode:
-        code = "COMPOSE_CONFIG_UNAVAILABLE" if parsed is None else "COMPOSE_CONFIG_INVALID"
-        evidence = (f"File: {compose_path}",) if parsed is None else (
-            f"File: {compose_path}", f"Exit code: {parsed.returncode}",
-        )
-        findings.append(
-            _finding(
-                code,
-                "FAIL",
-                "Compose configuration could not be validated. Output is suppressed to avoid "
-                "exposing interpolated values.",
-                evidence=evidence,
-                remedy="Run 'docker compose config' locally to inspect the validation error, "
-                "then correct the file.",
-            )
-        )
-    else:
+    validation = adapter.validate_config(compose_path, project_root=root)
+    if validation.valid:
         findings.append(
             _finding(
                 "COMPOSE_CONFIG_VALID",
@@ -316,6 +261,24 @@ def _check_compose(profile: ProjectProfile, root: Path, findings: list[Finding])
                 evidence=(f"File: {compose_path}",),
             )
         )
+        return
+    if validation.outcome == "unavailable":
+        code = "COMPOSE_CONFIG_UNAVAILABLE"
+        evidence = (f"File: {compose_path}",)
+    else:
+        code = "COMPOSE_CONFIG_INVALID"
+        evidence = (f"File: {compose_path}", f"Exit code: {validation.returncode}")
+    findings.append(
+        _finding(
+            code,
+            "FAIL",
+            "Compose configuration could not be validated. Output is suppressed to avoid "
+            "exposing interpolated values.",
+            evidence=evidence,
+            remedy="Run 'docker compose config' locally to inspect the validation error, "
+            "then correct the file.",
+        )
+    )
 
 
 def check_profile(
@@ -323,25 +286,26 @@ def check_profile(
     root: Path,
     *,
     environ: Mapping[str, str] | None = None,
+    adapter: RuntimeAdapter | None = None,
 ) -> list[Finding]:
-    """Return actionable diagnostics without changing the project or host."""
+    """Return actionable diagnostics without changing the project or host.
+
+    ``adapter`` defaults to the local Docker Compose adapter; tests pass a fake.
+    """
 
     env = os.environ if environ is None else environ
+    compose_adapter = ComposeAdapter() if adapter is None else adapter
     findings: list[Finding] = [
         _finding("PROFILE_VALID", "PASS", f"Profile is valid for {profile.project}")
     ]
 
     project_python = read_python_metadata(root)
     if project_python.declarations:
-        declarations = tuple(
-            f"{item.source}: {item.value}" for item in project_python.declarations
-        )
+        declarations = tuple(f"{item.source}: {item.value}" for item in project_python.declarations)
         current_executable = Path(os.path.abspath(sys.executable))
         candidates = _project_python_interpreters(root)
         selected = current_executable in candidates
-        version_text = (
-            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        )
+        version_text = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         interpreter_evidence: tuple[str, ...]
         if selected:
             interpreter_evidence = (
@@ -368,7 +332,8 @@ def check_profile(
                     if selected
                     else "the target project's interpreter is not the interpreter running DevDock."
                 ),
-                evidence=declarations + (f"DevDock executable: {current_executable}",)
+                evidence=declarations
+                + (f"DevDock executable: {current_executable}",)
                 + interpreter_evidence,
                 remedy=None
                 if selected
@@ -446,39 +411,8 @@ def check_profile(
                 )
             )
 
-    _check_compose(profile, root, findings)
-
-    if profile.compose_file is not None and "docker" not in profile.runtimes:
-        compose_path = root / profile.compose_file
-        if not _inside_project(compose_path, root):
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_OUTSIDE_PROJECT",
-                    "FAIL",
-                    "Compose file does not resolve inside the selected project.",
-                    evidence=(f"File: {compose_path}",),
-                    remedy="Remove the escaping symlink or choose a project-contained "
-                    "Compose file.",
-                )
-            )
-        elif compose_path.is_file():
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_FOUND",
-                    "PASS",
-                    f"Compose file found: {profile.compose_file}",
-                    evidence=(f"Path: {compose_path}",),
-                )
-            )
-        else:
-            findings.append(
-                _finding(
-                    "COMPOSE_FILE_MISSING",
-                    "FAIL",
-                    f"Compose file not found: {profile.compose_file}",
-                    remedy="Create the file or update compose_file in devdock.yaml.",
-                )
-            )
+    compose_path = _check_compose_file(profile, root, findings)
+    _check_compose(profile, root, findings, compose_adapter, compose_path)
 
     for name in profile.required_env:
         if name not in env:
@@ -532,9 +466,7 @@ def check_profile(
             )
         elif target.is_file():
             findings.append(
-                _finding(
-                    "REQUIRED_FILE_FOUND", "PASS", f"Required file found: {required_file}"
-                )
+                _finding("REQUIRED_FILE_FOUND", "PASS", f"Required file found: {required_file}")
             )
         else:
             findings.append(

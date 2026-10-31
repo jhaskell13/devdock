@@ -41,8 +41,11 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
-      - name: Check formatting and lint
-        run: python -m ruff check src tests
+      - name: Lint
+        run: python -m ruff check src tests scripts
+
+      - name: Check formatting
+        run: python -m ruff format --check src tests scripts
 
       - name: Check types
         run: python -m mypy src/devdock
@@ -51,5 +54,50 @@ jobs:
         run: python -m build
 
       - name: Smoke-test installed CLI
-        run: devdock --help
+        run: |
+          devdock --version
+          devdock --help
 
+
+  integration:
+    name: Docker integration (disposable resources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Deliberately gated. Ordinary pull requests never need a daemon; run this
+    # from the Actions tab, by labelling a pull request "integration", or on a
+    # push to main.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || contains(github.event.pull_request.labels.*.name, 'integration')
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install DevDock and development tools
+        run: python -m pip install -e ".[dev]"
+
+      - name: Confirm the Docker daemon is reachable
+        run: docker info --format '{{.ServerVersion}}'
+
+      - name: Run the Docker integration suite
+        run: python -m pytest -m docker -v
+
+      - name: Run the scripted demo walkthrough
+        run: python scripts/demo.py
+
+      - name: Report any resources the suite failed to clean up
+        if: always()
+        run: |
+          echo "Containers:"
+          docker ps -a --filter 'name=devdock-' --format '{{.Names}}'
+          echo "Volumes:"
+          docker volume ls --filter 'name=devdock-' --format '{{.Name}}'

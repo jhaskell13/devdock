@@ -6,9 +6,35 @@ from types import SimpleNamespace
 
 import pytest
 
+import devdock.adapters.compose as compose
 import devdock.diagnostics as diagnostics
+from devdock.adapters import ComposeAdapter
 from devdock.config import ProjectProfile
 from devdock.diagnostics import check_profile
+
+
+class CountingRunner:
+    """Scripted command results, with a record of how many ran.
+
+    Injected rather than monkeypatched over ``subprocess``: the adapter owns
+    how a command is executed, and a diagnostics test has no business knowing
+    whether that is ``run`` or ``Popen``.
+    """
+
+    def __init__(self, *results: object) -> None:
+        self._results = list(results)
+        self.calls = 0
+
+    def __call__(self, args: object, **kwargs: object) -> object:
+        self.calls += 1
+        result = self._results.pop(0) if len(self._results) > 1 else self._results[0]
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def compose_adapter(*results: object, executable: str | None = "docker-test") -> ComposeAdapter:
+    return ComposeAdapter(CountingRunner(*results), locate=lambda _: executable)  # type: ignore[arg-type]
 
 
 def test_unsupported_runtime_is_actionable(tmp_path: Path) -> None:
@@ -20,7 +46,7 @@ def test_unsupported_runtime_is_actionable(tmp_path: Path) -> None:
 
     findings = check_profile(profile, tmp_path)
 
-    assert any(finding.level == "FAIL" and "ruby" in finding.message for finding in findings)
+    assert any(finding.severity == "FAIL" and "ruby" in finding.summary for finding in findings)
 
 
 def test_unsupported_python_requirement_does_not_echo_configured_value(
@@ -65,15 +91,13 @@ def test_missing_compose_file_is_reported(tmp_path: Path) -> None:
     findings = check_profile(profile, tmp_path)
 
     assert any(
-        finding.level == "FAIL" and "Compose file not found" in finding.message
+        finding.severity == "FAIL" and "Compose file not found" in finding.summary
         for finding in findings
     )
 
 
 def test_findings_have_stable_codes_and_interpreter_evidence(tmp_path: Path) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", runtimes={"python": ">=3.12"}
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12"})
 
     findings = check_profile(profile, tmp_path)
 
@@ -96,15 +120,11 @@ def test_python_minimum_patch_version_is_compared(
     )
 
     patch_required = check_profile(
-        ProjectProfile(
-            schema_version=1, project="sample", runtimes={"python": ">=3.12.1"}
-        ),
+        ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12.1"}),
         tmp_path,
     )
     minor_required = check_profile(
-        ProjectProfile(
-            schema_version=1, project="sample", runtimes={"python": ">=3.12"}
-        ),
+        ProjectProfile(schema_version=1, project="sample", runtimes={"python": ">=3.12"}),
         tmp_path,
     )
 
@@ -119,13 +139,9 @@ def test_project_interpreter_is_distinguished_from_devdock_interpreter(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
 
-    findings = check_profile(
-        ProjectProfile(schema_version=1, project="sample"), tmp_path
-    )
+    findings = check_profile(ProjectProfile(schema_version=1, project="sample"), tmp_path)
 
-    project_finding = next(
-        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
-    )
+    project_finding = next(item for item in findings if item.code == "PROJECT_PYTHON_METADATA")
     assert project_finding.severity == "WARN"
     assert any("target not inspected" in item for item in project_finding.evidence)
 
@@ -136,9 +152,7 @@ def test_active_project_virtual_environment_reports_both_interpreter_pairs(
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
-    executable = tmp_path / ".venv" / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    )
+    executable = tmp_path / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     monkeypatch.setattr(
         diagnostics,
         "sys",
@@ -150,9 +164,7 @@ def test_active_project_virtual_environment_reports_both_interpreter_pairs(
 
     findings = check_profile(ProjectProfile(schema_version=1, project="sample"), tmp_path)
 
-    project_finding = next(
-        item for item in findings if item.code == "PROJECT_PYTHON_METADATA"
-    )
+    project_finding = next(item for item in findings if item.code == "PROJECT_PYTHON_METADATA")
     assert project_finding.severity == "PASS"
     assert any(item.startswith("DevDock executable:") for item in project_finding.evidence)
     assert any(item.startswith("Target project executable:") for item in project_finding.evidence)
@@ -211,9 +223,7 @@ def test_rejects_resolved_paths_outside_project_without_platform_symlink_support
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     outside = tmp_path.parent / "outside-project"
-    profile = ProjectProfile(
-        schema_version=1, project="sample", required_dirs=[Path("escape")]
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", required_dirs=[Path("escape")])
     original_resolve = Path.resolve
 
     def resolve_escape(path: Path, *args: object, **kwargs: object) -> Path:
@@ -231,9 +241,7 @@ def test_rejects_resolved_paths_outside_project_without_platform_symlink_support
 def test_unresolvable_required_paths_are_reported_without_crashing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", required_files=[Path("loop")]
-    )
+    profile = ProjectProfile(schema_version=1, project="sample", required_files=[Path("loop")])
     original_resolve = Path.resolve
 
     def fail_loop(path: Path, *args: object, **kwargs: object) -> Path:
@@ -267,21 +275,14 @@ def test_compose_file_symlink_cannot_escape_project(
             return outside
         return original_resolve(path, *args, **kwargs)
 
-    calls = 0
-
-    def fake_run(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        nonlocal calls
-        calls += 1
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
-
     monkeypatch.setattr(Path, "resolve", resolve_escape)
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
+    runner = CountingRunner(SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker-test")  # type: ignore[arg-type]
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
 
     assert any(item.code == "COMPOSE_FILE_OUTSIDE_PROJECT" for item in findings)
-    assert calls == 2  # CLI/plugin and daemon only; the external Compose file is never parsed.
+    assert runner.calls == 2  # CLI/plugin and daemon only; the external file is never parsed.
 
 
 def test_port_collision_reports_actionable_finding(tmp_path: Path) -> None:
@@ -309,6 +310,7 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
         runtimes={"docker": "compose"},
         compose_file=Path("compose.yaml"),
     )
+    calls: list[list[str]] = []
     results = iter(
         [
             SimpleNamespace(returncode=0, stdout="compose-output-secret", stderr=""),
@@ -316,16 +318,14 @@ def test_compose_cli_daemon_and_parser_are_checked_independently(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    calls: list[list[str]] = []
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
 
-    def fake_run(command: list[str], **_: object) -> SimpleNamespace:
+    def runner(command: list[str], **_: object) -> SimpleNamespace:
         calls.append(command)
         return next(results)
 
-    monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
+    adapter = ComposeAdapter(runner, locate=lambda _: "docker-test")  # type: ignore[arg-type]
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     codes = {item.code for item in findings}
 
     assert {
@@ -355,10 +355,12 @@ def test_compose_parser_errors_do_not_echo_interpolated_values(
             SimpleNamespace(returncode=1, stdout="", stderr="TOKEN=secret-value"),
         ]
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     invalid = next(item for item in findings if item.code == "COMPOSE_CONFIG_INVALID")
 
     assert "secret-value" not in repr(invalid)
@@ -383,14 +385,10 @@ def test_compose_reports_missing_cli_or_plugin(
     compose_result: SimpleNamespace | None,
     expected_code: str,
 ) -> None:
-    profile = ProjectProfile(
-        schema_version=1, project="sample", runtimes={"docker": "compose"}
-    )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: docker_path)
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"docker": "compose"})
+    monkeypatch.setattr(compose.shutil, "which", lambda _: docker_path)
     if compose_result is not None:
-        monkeypatch.setattr(
-            diagnostics.subprocess, "run", lambda *_args, **_kwargs: compose_result
-        )
+        monkeypatch.setattr(compose.subprocess, "run", lambda *_args, **_kwargs: compose_result)
 
     findings = check_profile(profile, tmp_path)
 
@@ -416,12 +414,72 @@ def test_compose_parser_is_checked_even_when_daemon_is_unavailable(
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: "docker-test")
-    monkeypatch.setattr(diagnostics.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
 
-    findings = check_profile(profile, tmp_path)
+    findings = check_profile(profile, tmp_path, adapter=adapter)
     codes = {item.code for item in findings}
 
     assert "DOCKER_DAEMON_UNAVAILABLE" in codes
     assert "COMPOSE_CONFIG_VALID" in codes
 
+
+def test_socket_permission_problems_get_their_own_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    profile = ProjectProfile(
+        schema_version=1,
+        project="sample",
+        runtimes={"docker": "compose"},
+        compose_file=Path("compose.yaml"),
+    )
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="v2", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="permission denied while trying to connect to the Docker daemon socket",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+    )
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
+
+    findings = check_profile(profile, tmp_path, adapter=adapter)
+    by_code = {item.code: item for item in findings}
+
+    assert by_code["DOCKER_DAEMON_PERMISSION_DENIED"].severity == "FAIL"
+    assert "DOCKER_DAEMON_AVAILABLE" not in by_code
+    assert "DOCKER_DAEMON_UNAVAILABLE" not in by_code
+    assert "docker" in (by_code["DOCKER_DAEMON_PERMISSION_DENIED"].remedy or "").lower()
+    assert "wsl --shutdown" in (by_code["DOCKER_DAEMON_PERMISSION_DENIED"].remedy or "")
+
+
+def test_daemon_probe_with_empty_success_is_reported_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `docker info` exits 0 with an unreachable socket."""
+
+    profile = ProjectProfile(schema_version=1, project="sample", runtimes={"docker": "compose"})
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="v2", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr="some client-side error"),
+        ]
+    )
+    adapter = ComposeAdapter(
+        lambda *_a, **_k: next(responses),  # type: ignore[arg-type]
+        locate=lambda _: "docker-test",
+    )
+
+    codes = {item.code for item in check_profile(profile, tmp_path, adapter=adapter)}
+
+    assert "DOCKER_DAEMON_UNAVAILABLE" in codes
+    assert "DOCKER_DAEMON_AVAILABLE" not in codes

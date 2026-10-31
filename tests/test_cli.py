@@ -1,9 +1,21 @@
+import os
+import re
+import signal
+import threading
+import time
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
-import devdock.diagnostics as diagnostics
+import devdock.adapters.compose as compose
+import devdock.cli as cli
+import devdock.render as render
+from devdock.adapters import NetworkRecord
 from devdock.cli import app
+from devdock.config import load_profile
+from devdock.lifecycle import LifecycleResult, StopPlan
+from devdock.ownership import OwnershipAssessment, ownership_scope
 
 runner = CliRunner()
 
@@ -40,9 +52,7 @@ def test_check_requires_a_profile(tmp_path: Path) -> None:
 
 
 def test_check_shows_target_interpreter_warning_without_failing(tmp_path: Path) -> None:
-    (tmp_path / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: sample\n", encoding="utf-8"
-    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
@@ -60,7 +70,7 @@ def test_check_reports_skipped_dependency_checks_and_preserves_failure_exit(
         "schema_version: 1\nproject: sample\nruntimes:\n  docker: compose\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(diagnostics.shutil, "which", lambda _: None)
+    monkeypatch.setattr(compose.shutil, "which", lambda _: None)
 
     result = runner.invoke(app, ["check", str(tmp_path)])
 
@@ -95,9 +105,7 @@ def test_inspect_explains_nested_roots_and_unicode_paths(tmp_path: Path) -> None
     inner = outer / "café"
     inner.mkdir(parents=True)
     (outer / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
-    (inner / "devdock.yaml").write_text(
-        "schema_version: 1\nproject: nested\n", encoding="utf-8"
-    )
+    (inner / "devdock.yaml").write_text("schema_version: 1\nproject: nested\n", encoding="utf-8")
 
     result = runner.invoke(app, ["inspect", str(inner)])
 
@@ -115,3 +123,620 @@ def test_init_reports_when_directory_cannot_be_created(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Could not create project directory" in result.stderr
 
+
+def test_inspect_reports_the_compose_project_name_devdock_will_manage(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text(
+        "schema_version: 1\nproject: Sample App\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["inspect", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Compose project name: devdock-sample-app-" in result.stdout
+
+
+def test_up_refuses_without_a_compose_file_and_exits_non_zero(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "[REFUSED] UP_COMPOSE_FILE_MISSING" in result.stderr
+    assert "Suggested action:" in result.stderr
+
+
+def test_up_requires_a_profile(tmp_path: Path) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "devdock.yaml was not found" in result.stderr
+
+
+def test_up_reports_a_successful_start_on_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_start(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("UP_STARTED", True, "Started devdock-sample-x.", ("detail",))
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(app, ["up", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[OK] UP_STARTED: Started devdock-sample-x." in result.stdout
+    assert "detail" in result.stdout
+
+
+def test_up_rejects_a_non_positive_timeout(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["up", str(tmp_path), "--timeout", "0"])
+
+    assert result.exit_code != 0
+
+
+def test_status_renders_a_report_on_stdout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def fake_status(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("STATUS_REPORTED", True, "Status for x.", ("SERVICE  STATE",))
+
+    monkeypatch.setattr(cli, "project_status", fake_status)
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "[OK] STATUS_REPORTED" in result.stdout and "SERVICE  STATE" in result.stdout
+
+
+def test_status_without_compose_file_exits_non_zero(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "STATUS_COMPOSE_FILE_MISSING" in result.stderr
+
+
+def _ready_project(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+
+def _fake_plan(tmp_path: Path, *, empty: bool = False) -> StopPlan:
+    from devdock.adapters import ContainerRecord, ResourceInventory
+    from devdock.config import ProjectProfile
+    from devdock.ownership import assess_ownership, ownership_scope
+
+    scope = ownership_scope(ProjectProfile(schema_version=1, project="sample"), tmp_path)
+    containers = (
+        ()
+        if empty
+        else (
+            ContainerRecord(
+                "c1",
+                f"{scope.project_name}-web-1",
+                "running",
+                scope.project_name,
+                str(scope.root),
+                str(scope.compose_file),
+                "web",
+                "False",
+            ),
+        )
+    )
+    inventory = ResourceInventory(scope.project_name, containers=containers)
+    assessment = assess_ownership(scope, inventory)
+    return StopPlan(scope, assessment, assessment.managed, (), (), ())
+
+
+def test_down_dry_run_prints_the_plan_and_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Will stop and remove 1 container(s)" in result.stdout
+    assert "DOWN_DRY_RUN" in result.stdout
+
+
+def test_down_without_a_terminal_requires_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+    result = runner.invoke(app, ["down", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "DOWN_CONFIRMATION_REQUIRED" in result.stderr
+    assert "Will stop and remove 1 container(s)" in result.stdout  # preview still shown
+
+
+def test_down_with_yes_executes_the_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    executed: list[StopPlan] = []
+
+    def fake_execute(plan: StopPlan, **_kwargs: object) -> LifecycleResult:
+        executed.append(plan)
+        return LifecycleResult("DOWN_STOPPED", True, "Stopped.", ())
+
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", fake_execute)
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 0 and len(executed) == 1
+    assert "[OK] DOWN_STOPPED" in result.stdout
+
+
+def test_down_interactive_decline_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(cli, "execute_stop", lambda *_a, **_k: pytest.fail("must not execute"))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+
+    result = runner.invoke(app, ["down", str(tmp_path)], input="n\n")
+
+    assert result.exit_code == 1
+    assert "DOWN_CANCELLED" in result.stderr
+
+
+def test_down_interactive_accept_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path))
+    monkeypatch.setattr(
+        cli, "execute_stop", lambda *_a, **_k: LifecycleResult("DOWN_STOPPED", True, "Stopped.", ())
+    )
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+
+    result = runner.invoke(app, ["down", str(tmp_path)], input="y\n")
+
+    assert result.exit_code == 0 and "[OK] DOWN_STOPPED" in result.stdout
+
+
+def test_down_with_nothing_to_do_needs_no_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    monkeypatch.setattr(cli, "plan_stop", lambda *_a, **_k: _fake_plan(tmp_path, empty=True))
+    monkeypatch.setattr(
+        cli,
+        "execute_stop",
+        lambda *_a, **_k: LifecycleResult("DOWN_NOTHING_TO_STOP", True, "Nothing.", ()),
+    )
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+
+    result = runner.invoke(app, ["down", str(tmp_path)])
+
+    assert result.exit_code == 0 and "DOWN_NOTHING_TO_STOP" in result.stdout
+
+
+def test_down_refusal_from_planning_is_rendered(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 1
+    assert "DOWN_COMPOSE_FILE_MISSING" in result.stderr
+
+
+def test_version_flag_reports_the_package_version() -> None:
+    from devdock import __version__
+
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == f"devdock {__version__}"
+
+
+def test_output_neutralizes_control_characters_from_runtime_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready_project(tmp_path)
+    hostile = "web\x1b[2J\x1b[H\x07 hidden\r\nfake [OK] line"
+
+    def fake_status(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult("STATUS_REPORTED", True, "Status.", (hostile,))
+
+    monkeypatch.setattr(cli, "project_status", fake_status)
+
+    result = runner.invoke(app, ["status", str(tmp_path)])
+
+    assert "\x1b" not in result.stdout and "\x07" not in result.stdout
+    assert "\r" not in result.stdout
+    assert "web?[2J?[H? hidden??fake [OK] line" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["true", "null", "1.0", "0o17", "a: b", "needs #quoting", "yes"])
+def test_init_produces_a_valid_profile_for_yaml_hostile_directory_names(
+    tmp_path: Path, name: str
+) -> None:
+    """A directory called "true" must not become a boolean project name."""
+    target = tmp_path / name
+
+    created = runner.invoke(app, ["init", str(target)])
+    checked = runner.invoke(app, ["check", str(target)])
+
+    assert created.exit_code == 0, created.stderr
+    assert checked.exit_code == 0, checked.stdout + checked.stderr
+    assert f"Profile is valid for {name}" in checked.stdout
+
+
+# --- interrupt handling -------------------------------------------------
+
+
+def test_interruptible_restores_the_handlers_it_replaced() -> None:
+    """DevDock must not change how an interrupt behaves outside its own work."""
+
+    before = signal.getsignal(signal.SIGINT)
+
+    with cli.interruptible():
+        assert signal.getsignal(signal.SIGINT) is not before
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_interruptible_restores_the_handlers_even_when_the_work_fails() -> None:
+    before = signal.getsignal(signal.SIGINT)
+
+    with pytest.raises(RuntimeError), cli.interruptible():
+        raise RuntimeError("boom")
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_the_first_interrupt_asks_the_work_to_stop(capsys: pytest.CaptureFixture[str]) -> None:
+    with cli.interruptible() as token:
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        assert not token.cancelled
+
+        handler(signal.SIGINT, None)
+
+        assert token.cancelled
+    assert "Stopping" in capsys.readouterr().err
+
+
+def test_the_second_interrupt_exits_with_the_interrupt_status() -> None:
+    """SystemExit, not KeyboardInterrupt: Click turns the latter into exit 1."""
+
+    with cli.interruptible():
+        handler = signal.getsignal(signal.SIGINT)
+        assert callable(handler)
+        handler(signal.SIGINT, None)
+
+        with pytest.raises(SystemExit) as raised:
+            handler(signal.SIGINT, None)
+
+    assert raised.value.code == cli.EXIT_INTERRUPTED == 130
+
+
+def test_interruptible_works_where_handlers_cannot_be_installed() -> None:
+    """A worker thread cannot take signals; the context must still be usable."""
+
+    outcome: list[object] = []
+
+    def run() -> None:
+        try:
+            with cli.interruptible() as token:
+                outcome.append(token.cancelled)
+        except BaseException as error:  # pragma: no cover - the failure we are excluding
+            outcome.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert outcome == [False]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
+def test_a_real_interrupt_reaches_the_handler() -> None:
+    """The handler is wired to the actual signal, not only callable by hand."""
+
+    with cli.interruptible() as token:
+        os.kill(os.getpid(), signal.SIGINT)
+        deadline = time.monotonic() + 5
+        while not token.cancelled and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert token.cancelled
+
+
+@pytest.mark.parametrize(
+    ("command", "patched", "code"),
+    [("up", "start_project", "UP_INTERRUPTED"), ("down", "execute_stop", "DOWN_INTERRUPTED")],
+)
+def test_an_interrupted_operation_exits_130_not_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, patched: str, code: str
+) -> None:
+    """A script must be able to tell "you stopped this" from "this did not work"."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    def interrupted(*_args: object, **_kwargs: object) -> LifecycleResult:
+        return LifecycleResult(code, False, "Interrupted at your request.", (), "Run status.")
+
+    monkeypatch.setattr(cli, patched, interrupted)
+    if command == "down":
+        monkeypatch.setattr(
+            cli,
+            "plan_stop",
+            lambda *_a, **_k: StopPlan(
+                scope=ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path),
+                assessment=OwnershipAssessment(
+                    scope=ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path),
+                    managed=(),
+                    conflicts=(),
+                    networks=(NetworkRecord("n", "net"),),
+                    volumes=(),
+                ),
+                affected=(),
+                remaining=(),
+                networks=(NetworkRecord("n", "net"),),
+                volumes=(),
+            ),
+        )
+
+    result = runner.invoke(app, [command, str(tmp_path), *(["--yes"] if command == "down" else [])])
+
+    assert result.exit_code == cli.EXIT_INTERRUPTED == 130
+    assert code in result.stderr
+
+
+def test_an_ordinary_refusal_still_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "start_project",
+        lambda *_a, **_k: LifecycleResult("UP_FAILED", False, "No.", (), "Fix it."),
+    )
+
+    assert runner.invoke(app, ["up", str(tmp_path)]).exit_code == 1
+
+
+# --- wait flags ---------------------------------------------------------
+
+
+def _project(tmp_path: Path) -> Path:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: sample\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_up_waits_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_start(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("UP_READY", True, "All services are ready.")
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(app, ["up", str(_project(tmp_path))])
+
+    assert result.exit_code == 0
+    assert seen["wait"] is True
+    assert seen["require_ready"] is False
+
+
+def test_up_accepts_no_wait_and_the_timing_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_start(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("UP_STARTED", True, "Started.")
+
+    monkeypatch.setattr(cli, "start_project", fake_start)
+
+    result = runner.invoke(
+        app,
+        [
+            "up",
+            str(_project(tmp_path)),
+            "--no-wait",
+            "--ready-timeout",
+            "12",
+            "--deadline",
+            "34",
+            "--require-ready",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen["wait"] is False
+    assert (seen["ready_timeout"], seen["deadline"]) == (12.0, 34.0)
+    assert seen["require_ready"] is True
+
+
+def test_wait_passes_its_options_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_wait(*_args: object, **kwargs: object) -> LifecycleResult:
+        seen.update(kwargs)
+        return LifecycleResult("WAIT_READY", True, "All services are ready.")
+
+    monkeypatch.setattr(cli, "wait_for_project", fake_wait)
+
+    result = runner.invoke(
+        app, ["wait", str(_project(tmp_path)), "--ready-timeout", "7", "--deadline", "8"]
+    )
+
+    assert result.exit_code == 0
+    assert (seen["ready_timeout"], seen["deadline"]) == (7.0, 8.0)
+    assert "WAIT_READY" in result.stdout
+
+
+def test_wait_reports_a_timeout_on_stderr_and_exits_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "wait_for_project",
+        lambda *_a, **_k: LifecycleResult(
+            "WAIT_READINESS_TIMEOUT", False, "db did not become ready.", (), "Raise it."
+        ),
+    )
+
+    result = runner.invoke(app, ["wait", str(_project(tmp_path))])
+
+    assert result.exit_code == 1
+    assert "WAIT_READINESS_TIMEOUT" in result.stderr
+
+
+def test_the_timing_flags_reject_nonsense(tmp_path: Path) -> None:
+    for flag in ("--ready-timeout", "--deadline"):
+        result = runner.invoke(app, ["up", str(_project(tmp_path)), flag, "0"])
+        assert result.exit_code != 0
+
+
+def test_wait_does_not_offer_a_way_to_mutate_the_project() -> None:
+    """It is a read-only command; nothing in its options should suggest otherwise."""
+
+    text = runner.invoke(app, ["wait", "--help"]).stdout
+
+    for mutating in ("--yes", "--dry-run", "--show-output", "--timeout "):
+        assert mutating not in text
+
+
+def test_init_points_the_profile_at_a_compose_file_it_can_see(tmp_path: Path) -> None:
+    """A starter profile that ignores the project is a second thing to configure."""
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0
+    written = load_profile(tmp_path / "devdock.yaml")
+    assert written.compose_file == Path("compose.yaml")
+    assert written.runtimes == {"docker": "compose"}
+    assert "Found compose.yaml" in result.stdout
+
+
+def test_init_claims_no_runtime_when_there_is_no_compose_file(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["init", str(tmp_path)])
+
+    written = load_profile(tmp_path / "devdock.yaml")
+    assert written.compose_file is None and written.runtimes == {}
+    assert "No Compose file was found" in result.stdout
+
+
+def test_an_initialized_compose_project_passes_its_own_checks(tmp_path: Path) -> None:
+    """init -> check must be a working sequence, not a starting point for editing."""
+
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    runner.invoke(app, ["init", str(tmp_path)])
+
+    checked = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "COMPOSE_FILE_FOUND" in checked.stdout
+    # The Docker findings depend on the machine; the point is that the profile
+    # now causes them to be attempted at all.
+    assert "DOCKER" in checked.stdout or "COMPOSE_CLI" in checked.stdout
+
+
+# --- styling cannot be injected -----------------------------------------
+
+
+def test_a_hostile_name_cannot_smuggle_styling_through_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordering that makes colour safe: sanitize first, then style.
+
+    A container name is chosen by whoever can talk to the Docker daemon. By
+    the time styling runs there are no escape sequences left in the text
+    except the ones DevDock put there, so a name cannot paint itself, hide a
+    line, or forge a marker.
+    """
+
+    hostile = "\x1b[2J\x1b[31mROOT\x07 pwned"
+    monkeypatch.setattr(
+        cli,
+        "project_status",
+        lambda *_a, **_k: LifecycleResult(
+            "STATUS_REPORTED", True, f"Status for {hostile}.", (f"  {hostile}: ready",)
+        ),
+    )
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--color", "always", "status", str(tmp_path)], color=True)
+
+    assert result.exit_code == 0
+    assert "\x1b[2J" not in result.stdout, "a clear-screen sequence survived"
+    assert "\x07" not in result.stdout
+    assert set(re.findall(r"\x1b\[[0-9;]*m", result.stdout)) <= {
+        render.RESET,
+        render.BOLD,
+        render.DIM,
+        render.RED,
+        render.GREEN,
+        render.YELLOW,
+        render.CYAN,
+    }
+
+
+def test_output_carries_no_styling_when_it_is_not_a_terminal(tmp_path: Path) -> None:
+    """Piping DevDock into a file must give the same text it always did."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "\x1b[" not in result.stdout
+
+
+def test_check_ends_with_a_count_of_what_it_found(tmp_path: Path) -> None:
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["check", str(tmp_path)])
+
+    assert "Summary: 1 passed." in result.stdout
+
+
+def test_the_down_preview_is_grouped_like_every_other_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It was printed directly and so missed the spacing the rest gets."""
+
+    (tmp_path / "devdock.yaml").write_text("schema_version: 1\nproject: s\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    scope = ownership_scope(load_profile(tmp_path / "devdock.yaml"), tmp_path)
+    assessment = OwnershipAssessment(
+        scope=scope, managed=(), conflicts=(), networks=(), volumes=("vol",)
+    )
+    monkeypatch.setattr(
+        cli,
+        "plan_stop",
+        lambda *_a, **_k: StopPlan(
+            scope=scope,
+            assessment=assessment,
+            affected=(),
+            remaining=(),
+            networks=(),
+            volumes=("vol",),
+        ),
+    )
+
+    result = runner.invoke(app, ["down", str(tmp_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert "" in lines, "the preview should be grouped"
+    assert lines[-1].startswith("[OK] DOWN_DRY_RUN")
+    assert lines[-2] == ""

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve DevDock. The project is early and its command and profile formats may still change, so open an issue or discussion before making large or compatibility-sensitive changes.
+Thanks for helping improve DevDock. By participating you agree to the [code of conduct](CODE_OF_CONDUCT.md). The project is early and its command and profile formats may still change, so open an issue or discussion before making large or compatibility-sensitive changes.
 
 ## Development setup
 
@@ -21,11 +21,39 @@ Run the checks from the repository root. On Windows, use the virtual environment
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m ruff format --check src tests
 .\.venv\Scripts\python.exe -m mypy src/devdock
 .\.venv\Scripts\python.exe -m build
 ```
 
-On Linux or macOS, use the equivalent `python -m ...` commands after activating `.venv`.
+On Linux or macOS, use the equivalent `python -m ...` commands after activating `.venv`. Code is formatted with `ruff format`; run it before committing, or install the optional pre-commit hooks from `.pre-commit-config.yaml`.
+
+### Test suites
+
+The default run never needs Docker:
+
+```
+python -m pytest
+```
+
+The Docker suite is marked `docker` and deselected by default. With a daemon running:
+
+```
+python -m pytest -m docker
+```
+
+It spends almost all of its time waiting on containers, so it parallelises
+well. Each test derives its own Compose project name from its own temporary
+directory, and each worker takes its own slice of the host port range:
+
+```sh
+python -m pytest -m docker -n 4
+```
+
+The default suite runs in about twelve seconds, where `-n` would cost more in
+start-up than it saves, so nothing is parallelised unless you ask for it.
+
+It creates only disposable containers, networks, and volumes in a temporary directory, and removes them in fixture teardown, including the volumes DevDock itself preserves. It skips rather than fails when no daemon is reachable. `python scripts/demo.py` runs the same ground as a readable walkthrough.
 
 Add or update tests when behavior changes. Prefer synthetic temporary project directories and fake adapters. Unit tests must not require a running Docker daemon, real credentials, personal data, or access to production systems.
 

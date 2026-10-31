@@ -4,12 +4,26 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devdock"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A local development environment manager"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
+keywords = ["docker", "compose", "development-environment", "cli", "local"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.7,<3",
     "PyYAML>=6,<7",
@@ -20,10 +34,17 @@ dependencies = [
 dev = [
     "build>=1.2,<2",
     "pytest>=8,<9",
+    "pytest-xdist>=3,<4",
     "ruff>=0.5,<1",
     "mypy>=1.10,<2",
     "types-PyYAML>=6,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jhaskell13/devdock"
+Documentation = "https://github.com/jhaskell13/devdock/tree/main/docs"
+Changelog = "https://github.com/jhaskell13/devdock/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jhaskell13/devdock/issues"
 
 [project.scripts]
 devdock = "devdock.cli:app"
@@ -31,8 +52,26 @@ devdock = "devdock.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+devdock = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = {attr = "devdock.__version__"}
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The Docker suite is deselected by default so an ordinary run never depends on
+# a daemon. Run it explicitly with: pytest -m docker
+addopts = "-m 'not docker'"
+markers = [
+    "docker: requires a reachable Docker daemon and creates disposable local resources",
+]
+# The Docker suite spends almost all of its time waiting on containers, so it
+# parallelises well: each test derives its own Compose project name from its
+# own temporary directory, and each xdist worker takes its own slice of the
+# host port range. Run it with: pytest -m docker -n 4
+#   The default suite is fast enough that xdist's startup would cost more than
+#   it saves, so nothing is parallelised unless -n is given.
 
 [tool.ruff]
 line-length = 100
