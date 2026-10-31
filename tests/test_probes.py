@@ -495,3 +495,33 @@ def test_a_request_the_http_client_rejects_is_a_result_not_a_traceback() -> None
             raise ValueError("'ascii' codec can't encode character")
 
     assert run_probe(http_probe(), network=Raiser()) == ProbeResult(False, MALFORMED)
+
+
+def test_a_non_loopback_host_is_refused_without_even_being_resolved() -> None:
+    """The declared host is checked before anything looks it up.
+
+    The check after resolution would reject it too, so this looks redundant
+    -- and a mutation removing it survives the rest of the suite. It is not:
+    resolving first would mean a profile that arrived with a repository could
+    make DevDock perform a DNS lookup of a name of its choosing, which is a
+    signal leaving the machine before any refusal happens.
+    """
+
+    class Watchful(FakeNetwork):
+        def __init__(self) -> None:
+            super().__init__()
+            self.resolved: list[str] = []
+
+        def resolve(self, host: str, port: int) -> tuple[str, ...]:
+            self.resolved.append(host)
+            return super().resolve(host, port)
+
+    network = Watchful()
+    probe = TcpReadiness.model_construct(
+        type="tcp", host="lookup-me.example.com", port=5432, timeout=1.0
+    )
+
+    result = run_probe(probe, network=network)
+
+    assert result == ProbeResult(False, NOT_LOOPBACK)
+    assert network.resolved == [], "the name must not reach a resolver"
