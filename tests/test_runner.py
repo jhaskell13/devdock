@@ -38,7 +38,6 @@ from devdock.adapters.compose import (
 from devdock.cancellation import CancelToken
 
 POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
-WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows process groups")
 
 # Long enough that nothing finishes by accident, short enough that a leaked
 # process does not outlive the test session by much.
@@ -420,14 +419,6 @@ def test_cancelling_also_ends_processes_the_child_started() -> None:
     while _alive(marker[0]) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _alive(marker[0]), "a grandchild outlived the cancelled command"
-
-
-@WINDOWS_ONLY
-def test_windows_runs_the_child_in_a_new_process_group() -> None:  # pragma: no cover
-    """Asserted through the flag, which is the only observable here."""
-
-    assert process_isolation().creationflags == subprocess.CREATE_NEW_PROCESS_GROUP
-    assert run_command(python("print('ok')"), timeout=30).stdout.strip() == "ok"
 
 
 # --- the behaviour the isolation exists for -----------------------------

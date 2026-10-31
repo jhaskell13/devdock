@@ -13,7 +13,7 @@
 services:
   migrate:
     image: busybox:stable
-    command: ["sh", "-c", "echo 'migrating'; sleep 3; echo 'done'"]
+    command: ["sh", "-c", "echo 'migrating'; sleep 1; echo 'done'"]
 
   web:
     image: nginx:alpine
@@ -24,7 +24,7 @@ services:
       - "18080:80"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
-      interval: 2s
+      interval: 1s
       timeout: 2s
       retries: 10
       start_period: 1s

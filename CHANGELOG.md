@@ -40,6 +40,7 @@ Notable user-facing changes are recorded here. The project is pre-release; entri
 
 ### Fixed
 
+- The promise that an interrupt removes nothing was worded three different ways depending on where the interrupt landed, so a reader could not match what they were told against what they had read before. Every path now ends with the same sentence.
 - `devdock up` reported a completed one-shot service by its internal name while `devdock status` called the same state `exited cleanly`. Both now use the display label.
 - Docker commands ran in DevDock's own process group, so a terminal's Ctrl+C went straight to `docker` as well — the terminal, not DevDock, was interrupting an operation part-way through, and DevDock only found out afterwards. Each command now runs in a group of its own. On POSIX the whole group is signalled when a command is cancelled or times out, so a helper process is not left behind, and no exit path can leave a running child.
 - Captured command output was unbounded. It is now written to a temporary file instead of a pipe, so a command cannot stall on a full buffer and partial output survives a timeout, and at most 1 MB is read back. Line endings are normalized so Windows and POSIX output are the same string.

@@ -617,7 +617,7 @@ def test_cancelling_stops_the_wait_without_touching_anything() -> None:
 
     assert outcome.status == "cancelled"
     assert script.calls == 0
-    assert any("Nothing was stopped or removed" in line for line in outcome.detail)
+    assert any("Nothing was removed." in line for line in outcome.detail)
 
 
 def test_cancelling_midway_is_noticed_at_the_next_poll() -> None:
@@ -1113,3 +1113,36 @@ def test_a_service_is_not_called_overdue_on_the_pass_it_became_ready() -> None:
     assert outcome.ok, outcome.explain()
     db = next(item for item in outcome.progress if item.service == "db")
     assert db.reached_success and db.succeeded_at is not None
+
+
+@pytest.mark.parametrize("during", ["waiting", "launching"])
+def test_every_interrupt_makes_the_same_promise_in_the_same_words(during: str) -> None:
+    """One guarantee should not have three wordings.
+
+    It had: "Nothing was stopped or removed", "Nothing was removed", and a
+    third inside the Compose call. A test that quoted one of them passed
+    until the interrupt happened to land on a different path.
+    """
+
+    token = CancelToken()
+    script = Script(Snapshot((status("web", "starting", sources=[health(False)]),)))
+
+    if during == "waiting":
+        token.cancel()
+        outcome, _ = run(graph_for(["web"]), script, cancel=token)
+    else:
+
+        def launcher(batch: tuple[str, ...]) -> None:
+            token.cancel()
+            return None
+
+        outcome = wait_for_ready(
+            graph_for(["web"]),
+            script,
+            clock=FakeClock(),
+            cancel=token,
+            launcher=launcher,  # type: ignore[arg-type]
+        )
+
+    assert outcome.status == "cancelled"
+    assert any("Nothing was removed." in line for line in outcome.detail), outcome.detail

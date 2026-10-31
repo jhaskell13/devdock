@@ -1361,7 +1361,7 @@ def test_a_cancelled_wait_leaves_the_project_alone(tmp_path: Path) -> None:
     result = wait_for_project(profile(), root, adapter=adapter, cancel=token)
 
     assert result.code == "WAIT_INTERRUPTED"
-    assert any("Nothing was stopped or removed" in line for line in result.lines)
+    assert any("Nothing was removed." in line for line in result.lines)
 
 
 def test_an_ownership_conflict_is_reported_before_the_graph_is_even_read(

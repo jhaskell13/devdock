@@ -34,6 +34,7 @@ dependencies = [
 dev = [
     "build>=1.2,<2",
     "pytest>=8,<9",
+    "pytest-xdist>=3,<4",
     "ruff>=0.5,<1",
     "mypy>=1.10,<2",
     "types-PyYAML>=6,<7",
@@ -65,6 +66,12 @@ addopts = "-m 'not docker'"
 markers = [
     "docker: requires a reachable Docker daemon and creates disposable local resources",
 ]
+# The Docker suite spends almost all of its time waiting on containers, so it
+# parallelises well: each test derives its own Compose project name from its
+# own temporary directory, and each xdist worker takes its own slice of the
+# host port range. Run it with: pytest -m docker -n 4
+#   The default suite is fast enough that xdist's startup would cost more than
+#   it saves, so nothing is parallelised unless -n is given.
 
 [tool.ruff]
 line-length = 100

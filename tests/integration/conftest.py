@@ -9,6 +9,7 @@ including the volumes DevDock itself deliberately preserves.
 from __future__ import annotations
 
 import itertools
+import os
 import random
 import shutil
 import socket
@@ -31,7 +32,14 @@ EXAMPLE_PORT = "18080"
 # port asynchronously after `compose down`, so consecutive tests sharing one
 # port raced each other into a genuine UP_PORT_CONFLICT. A per-session random
 # base keeps reruns from colliding with ports a previous run has not yet freed.
-_ports = itertools.count(random.randint(20000, 40000))
+#
+# Each xdist worker gets its own slice of that range as well. Two workers can
+# otherwise pass the bind check for the same port in the same instant, and the
+# second one finds out by failing a test rather than by picking another port.
+_WORKER_SLICE = 1000
+_worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+_offset = int(_worker.removeprefix("gw") or 0) * _WORKER_SLICE
+_ports = itertools.count(random.randint(20000, 30000) + _offset)
 
 
 def _next_free_port() -> int:

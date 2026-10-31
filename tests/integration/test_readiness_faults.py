@@ -254,6 +254,6 @@ def test_an_interrupt_during_a_wait_exits_130_and_removes_nothing(
 
     assert process.returncode == 130, output
     assert "UP_INTERRUPTED" in output
-    assert "Nothing was removed" in output or "nothing was removed" in output.lower()
+    assert "Nothing was removed" in output
     # The container it did create is still there: an interrupt is not a teardown.
     assert docker("ps", "-aq", "--filter", "name=devdock-fault").stdout.strip()

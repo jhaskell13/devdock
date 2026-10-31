@@ -398,8 +398,15 @@ def test_lookups_find_both_directions_of_an_edge() -> None:
 # --- randomized graphs ---------------------------------------------------
 
 
-def _random_dag(rng: random.Random, size: int) -> tuple[list[str], dict[str, dict[str, str]]]:
-    """A DAG by construction: a service may only depend on an earlier name."""
+def _random_dag(
+    rng: random.Random, size: int, *, connected: bool = False
+) -> tuple[list[str], dict[str, dict[str, str]]]:
+    """A DAG by construction: a service may only depend on an earlier name.
+
+    ``connected`` guarantees at least one edge. Tests that are about edges
+    used to skip the seeds that happened to produce none, which quietly meant
+    three of every hundred ran no assertion at all.
+    """
 
     names = [f"s{index:02d}" for index in range(size)]
     edges: dict[str, dict[str, str]] = {}
@@ -408,6 +415,8 @@ def _random_dag(rng: random.Random, size: int) -> tuple[list[str], dict[str, dic
         chosen = rng.sample(candidates, rng.randint(0, min(len(candidates), 3)))
         if chosen:
             edges[name] = dict.fromkeys(chosen, "service_started")
+    if connected and not edges and size > 1:
+        edges[names[1]] = {names[0]: "service_started"}
     rng.shuffle(names)
     return names, edges
 
@@ -462,11 +471,10 @@ def test_closing_any_dependency_path_into_a_loop_is_detected(seed: int) -> None:
     """Point something a service already depends on back at that service."""
 
     rng = random.Random(seed)
-    names, edges = _random_dag(rng, rng.randint(2, 25))
+    names, edges = _random_dag(rng, rng.randint(2, 25), connected=True)
     graph_of(names, compose=edges)  # type: ignore[arg-type]  # acyclic to begin with
     with_dependencies = [name for name in sorted(names) if _reachable_from(name, edges)]
-    if not with_dependencies:
-        pytest.skip("this seed produced a graph with no dependencies at all")
+    assert with_dependencies, "the generator must produce something to close into a loop"
     service = rng.choice(with_dependencies)
     target = rng.choice(sorted(_reachable_from(service, edges)))
     edges.setdefault(target, {})[service] = "service_started"

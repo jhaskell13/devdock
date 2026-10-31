@@ -499,7 +499,7 @@ def wait_for_ready(
             return _outcome(
                 "cancelled",
                 "Interrupted while waiting for services to become ready.",
-                ("Nothing was stopped or removed.",),
+                ("Services that had already started are still running. Nothing was removed.",),
                 tracker=tracker,
                 elapsed=ticker.now() - started,
             )

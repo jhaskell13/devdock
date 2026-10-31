@@ -42,6 +42,17 @@ The Docker suite is marked `docker` and deselected by default. With a daemon run
 python -m pytest -m docker
 ```
 
+It spends almost all of its time waiting on containers, so it parallelises
+well. Each test derives its own Compose project name from its own temporary
+directory, and each worker takes its own slice of the host port range:
+
+```sh
+python -m pytest -m docker -n 4
+```
+
+The default suite runs in about twelve seconds, where `-n` would cost more in
+start-up than it saves, so nothing is parallelised unless you ask for it.
+
 It creates only disposable containers, networks, and volumes in a temporary directory, and removes them in fixture teardown, including the volumes DevDock itself preserves. It skips rather than fails when no daemon is reachable. `python scripts/demo.py` runs the same ground as a readable walkthrough.
 
 Add or update tests when behavior changes. Prefer synthetic temporary project directories and fake adapters. Unit tests must not require a running Docker daemon, real credentials, personal data, or access to production systems.
