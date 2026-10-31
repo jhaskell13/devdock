@@ -24,6 +24,11 @@ from pathlib import Path
 import pytest
 from helpers import docker, run_devdock
 
+from devdock.adapters import PROJECT_LABEL
+from devdock.config import load_profile
+from devdock.discovery import CONFIG_NAME
+from devdock.ownership import ownership_scope
+
 pytestmark = pytest.mark.docker
 
 Build = Callable[..., Path]
@@ -34,6 +39,21 @@ IDLE = '["sh", "-c", "while true; do sleep 5; done"]'
 
 def service(name: str, *, healthcheck: str = "", command: str = IDLE, depends: str = "") -> str:
     return f"  {name}:\n    image: {BUSYBOX}\n    command: {command}\n{depends}{healthcheck}"
+
+
+def containers_of(root: Path) -> list[str]:
+    """Container ids belonging to this project, and to no other.
+
+    Every synthetic project writes the same ``project:`` into its profile, so
+    they differ only by the digest DevDock derives from the directory. A
+    ``--filter name=devdock-fault`` is a substring match and therefore picks
+    up every other synthetic project too -- including, when the suite runs in
+    parallel, ones another worker is still using. The project label is exact.
+    """
+
+    name = ownership_scope(load_profile(root / CONFIG_NAME), root).project_name
+    found = docker("ps", "-aq", "--filter", f"label={PROJECT_LABEL}={name}")
+    return found.stdout.split()
 
 
 def health(test: str, *, start_period: str = "0s", retries: int = 1) -> str:
@@ -220,7 +240,7 @@ def test_a_cycle_only_the_merged_graph_can_see_is_refused(synthetic: Build) -> N
 
     assert result.returncode == 1
     assert "UP_DEPENDENCY_CYCLE" in result.stderr
-    assert docker("ps", "-aq", "--filter", "name=devdock-fault").stdout.strip() == ""
+    assert containers_of(root) == [], "nothing may be created when the graph is refused"
 
 
 # --- interruption ---------------------------------------------------------
@@ -256,4 +276,4 @@ def test_an_interrupt_during_a_wait_exits_130_and_removes_nothing(
     assert "UP_INTERRUPTED" in output
     assert "Nothing was removed" in output
     # The container it did create is still there: an interrupt is not a teardown.
-    assert docker("ps", "-aq", "--filter", "name=devdock-fault").stdout.strip()
+    assert containers_of(root), "an interrupt removed what it had started"

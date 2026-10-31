@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import shutil
 import time
+import uuid
 from pathlib import Path
 
 import pytest
 from helpers import compose_teardown, docker, run_devdock
 
-from devdock.adapters import ComposeAdapter
+from devdock.adapters import PROJECT_LABEL, ComposeAdapter
 from devdock.config import load_profile
 from devdock.discovery import CONFIG_NAME
 from devdock.lifecycle import (
@@ -141,6 +142,10 @@ def test_an_unrelated_compose_project_is_left_untouched(project: Path, tmp_path:
 
     outsider = tmp_path / "outsider"
     outsider.mkdir()
+    # Unique per run. A fixed name would let a container left behind by an
+    # interrupted run stand in for the one this test started, and would
+    # collide outright if the suite were ever run twice at once.
+    outsider_name = f"devdock-integration-outsider-{uuid.uuid4().hex[:12]}"
     (outsider / "compose.yaml").write_text(
         'services:\n  solo:\n    image: busybox:stable\n    command: ["sleep", "600"]\n',
         encoding="utf-8",
@@ -152,7 +157,7 @@ def test_an_unrelated_compose_project_is_left_untouched(project: Path, tmp_path:
         "--file",
         str(outsider / "compose.yaml"),
         "--project-name",
-        "devdock-integration-outsider",
+        outsider_name,
         "up",
         "--detach",
         check=True,
@@ -164,13 +169,13 @@ def test_an_unrelated_compose_project_is_left_untouched(project: Path, tmp_path:
         survivors = docker(
             "ps",
             "--filter",
-            "label=com.docker.compose.project=devdock-integration-outsider",
+            f"label={PROJECT_LABEL}={outsider_name}",
             "--format",
             "{{.Names}}",
         )
         assert survivors.stdout.strip(), "DevDock removed an unrelated project's container"
     finally:
-        compose_teardown(outsider, "devdock-integration-outsider")
+        compose_teardown(outsider, outsider_name)
 
 
 def test_a_foreign_container_under_the_project_name_blocks_action(
